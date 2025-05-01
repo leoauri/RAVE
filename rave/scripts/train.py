@@ -1,12 +1,15 @@
 import hashlib
+import pdb
+import multiprocessing
 import os
 import sys
+from pathlib import Path
 from typing import Any, Dict
 
 import gin
 import pytorch_lightning as pl
 import torch
-from absl import flags, app
+from absl import flags, app, logging
 from torch.utils.data import DataLoader
 
 try:
@@ -16,10 +19,11 @@ except:
     sys.path.append(os.path.abspath('.'))
     import rave
 
+import acids_dataset as ad
 import rave
 import rave.core
 import rave.dataset
-from rave.transforms import get_augmentations, add_augmentation
+from rave.dataset import get_augmentations, parse_transform
 
 
 FLAGS = flags.FLAGS
@@ -76,6 +80,7 @@ flags.DEFINE_bool('progress',
 flags.DEFINE_bool('smoke_test', 
                   default=False,
                   help="Run training with n_batches=1 to test the model")
+flags.DEFINE_bool('allow_partial_resume', default=False, help="allow partial resuming of a checkpoint")
 
 
 class EMA(pl.Callback):
@@ -124,11 +129,12 @@ def add_gin_extension(config_name: str) -> str:
         config_name += '.gin'
     return config_name
 
-def parse_augmentations(augmentations):
+def parse_augmentations(augmentations, sr):
     for a in augmentations:
-        gin.parse_config_file(a)
-        add_augmentation()
-        gin.clear_config()
+        with ad.GinEnv(paths=[Path(rave.__file__).parent / "configs" / "augmentations"]):
+            gin.parse_config_file(a)
+            parse_transform()
+            gin.clear_config()
     return get_augmentations()
 
 def main(argv):
@@ -137,28 +143,33 @@ def main(argv):
 
     # check dataset channels
     n_channels = rave.dataset.get_training_channels(FLAGS.db_path, FLAGS.channels)
-    gin.bind_parameter('RAVE.n_channels', n_channels)
-
-    # parse augmentations
-    augmentations = parse_augmentations(map(add_gin_extension, FLAGS.augment))
-    gin.bind_parameter('dataset.get_dataset.augmentations', augmentations)
+    FLAGS.override.append('RAVE.n_channels=%d'%n_channels)
 
     # parse configuration
     if FLAGS.ckpt:
         config_file = rave.core.search_for_config(FLAGS.ckpt)
         if config_file is None:
-            print('Config file not found in %s'%FLAGS.run)
-        gin.parse_config_file(config_file)
+            logging.error('Config file not found in %s'%FLAGS.run)
+            exit()
+        gin.parse_config_files_and_bindings([config_file], FLAGS.override)
     else:
         gin.parse_config_files_and_bindings(
             map(add_gin_extension, FLAGS.config),
             FLAGS.override,
         )
 
+
     # create model
-    model = rave.RAVE(n_channels=FLAGS.channels)
+    model = rave.RAVE(n_channels=n_channels)
     if FLAGS.derivative:
+        #TODO replace with transform
         model.integrator = rave.dataset.get_derivator_integrator(model.sr)[1]
+    gin.constant('SAMPLE_RATE', model.sr)
+    
+    # parse augmentations
+    with gin.unlock_config():
+        augmentations = parse_augmentations(map(add_gin_extension, FLAGS.augment), sr=model.sr)
+        gin.bind_parameter('dataset.get_dataset.augmentations', augmentations)
 
     # parse datasset
     dataset = rave.dataset.get_dataset(FLAGS.db_path,
@@ -167,8 +178,10 @@ def main(argv):
                                        derivative=FLAGS.derivative,
                                        normalize=FLAGS.normalize,
                                        rand_pitch=FLAGS.rand_pitch,
+                                       augmentations=augmentations,
                                        n_channels=n_channels)
-    train, val = rave.dataset.split_dataset(dataset, 98)
+
+    train, val = rave.dataset.split_dataset(dataset, percent=98)
 
     # get data-loader
     num_workers = FLAGS.workers
@@ -212,27 +225,28 @@ def main(argv):
 
     print('selected gpu:', gpu)
 
+    #TODO better handling
     accelerator = None
     devices = None
     if FLAGS.gpu == [-1]:
-        pass
+        accelerator = "cpu"
+        devices = 1
     elif torch.cuda.is_available():
         accelerator = "cuda"
         devices = FLAGS.gpu or rave.core.setup_gpu()
     elif torch.backends.mps.is_available():
-        print(
-            "Training on mac is not available yet. Use --gpu -1 to train on CPU (not recommended)."
-        )
-        exit()
         accelerator = "mps"
         devices = 1
+    else:
+        accelerator = "cpu"
+        devices = 1
+        
 
     callbacks = [
         validation_checkpoint,
         last_checkpoint,
         rave.model.WarmupCallback(),
         rave.model.QuantizeCallback(),
-        # rave.core.LoggerCallback(rave.core.ProgressLogger(RUN_NAME)),
         rave.model.BetaWarmupCallback(),
     ]
 
@@ -251,17 +265,12 @@ def main(argv):
         max_steps=FLAGS.max_steps,
         profiler="simple",
         enable_progress_bar=FLAGS.progress,
+        log_every_n_steps=min(30, len(dataset)),
         **val_check,
     )
 
     run = rave.core.search_for_run(FLAGS.ckpt)
-    if run is not None:
-        print('loading state from file %s'%run)
-        loaded = torch.load(run, map_location='cpu')
-        # model = model.load_state_dict(loaded)
-        trainer.fit_loop.epoch_loop._batches_that_stepped = loaded['global_step']
-        # model = model.load_state_dict(loaded['state_dict'])
-    
+
     with open(os.path.join(FLAGS.out_path, RUN_NAME, "config.gin"), "w") as config_out:
         config_out.write(gin.operative_config_str())
 

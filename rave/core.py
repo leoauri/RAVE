@@ -152,7 +152,7 @@ def hinge_gan(score_real, score_fake):
     loss_dis = torch.relu(1 - score_real) + torch.relu(1 + score_fake)
     loss_dis = loss_dis.mean()
     loss_gen = -score_fake.mean()
-    return loss_dis, loss_gen
+    return loss_dis / 2, loss_gen
 
 
 def ls_gan(score_real, score_fake):
@@ -171,8 +171,12 @@ def nonsaturating_gan(score_real, score_fake):
 
 def get_minimum_size(model):
     N = 2**15
+    if hasattr(model, "n_channels"):
+        n_channels = model.n_channels
+    else:
+        n_channels = 1
     device = next(iter(model.parameters())).device
-    x = torch.randn(1, model.n_channels, N, requires_grad=True, device=device)
+    x = torch.randn(1, n_channels, N, requires_grad=True, device=device)
     z = model.encode(x)
     return int(x.shape[-1] / z.shape[-1])
 

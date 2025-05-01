@@ -423,8 +423,11 @@ class RAVE(pl.LightningModule):
         self.log_dict(loss_gen)
         p.tick('logging')
 
-    def validation_step(self, x, batch_idx):
+    def validation_step(self, batch, batch_idx):
+        """pytorch lightning version compatibility -_-'"""
+        return self.on_validation_step(batch, batch_idx)
 
+    def on_validation_step(self, x, batch_idx):
         z = self.encode(x)
         if isinstance(self.encoder, blocks.VariationalEncoder):
             mean = torch.split(z, z.shape[1] // 2, 1)[0]
@@ -442,7 +445,7 @@ class RAVE(pl.LightningModule):
 
         return torch.cat([x, y], -1), mean
 
-    def validation_epoch_end(self, out):
+    def on_validation_batch_end(self, out, *args, **kwargs):
         if not self.receptive_field.sum():
             print("Computing receptive field for this configuration...")
             lrf, rrf = rave.core.get_rave_receptive_field(self, n_channels=self.n_channels)
@@ -454,7 +457,7 @@ class RAVE(pl.LightningModule):
 
         if not len(out): return
 
-        audio, z = list(zip(*out))
+        audio, z = out
         audio = list(map(lambda x: x.cpu(), audio))
 
         if self.trainer.state.stage == RunningStage.SANITY_CHECKING:
@@ -463,7 +466,7 @@ class RAVE(pl.LightningModule):
         # LATENT SPACE ANALYSIS
         if not self.warmed_up and isinstance(self.encoder,
                                              blocks.VariationalEncoder):
-            z = torch.cat(z, 0)
+            #z = torch.cat(z, 0)
             z = rearrange(z, "b c t -> (b t) c")
 
             self.latent_mean.copy_(z.mean(0))
@@ -487,7 +490,7 @@ class RAVE(pl.LightningModule):
                     np.argmax(var > p).astype(np.float32),
                 )
 
-        y = torch.cat(audio, 0)[:8].reshape(-1).numpy()
+        y = torch.cat(audio[:16], 0).reshape(-1).numpy()
         if self.integrator is not None:
             y = self.integrator(y)
         self.logger.experiment.add_audio("audio_val", y, self.eval_number,

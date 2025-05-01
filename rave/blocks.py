@@ -1,7 +1,18 @@
 from functools import partial
 from typing import Callable, Optional, Sequence, Union
 
-import torchbend as tb
+try:
+    import torchbend as tb
+except ModuleNotFoundError:
+    class MarkPlaceholder:
+        @staticmethod
+        def mark(*args, **kwargs):
+            if len(args) > 0:
+                return args[0]
+            else:
+                return lambda x: x
+    tb = MarkPlaceholder
+
 import cached_conv as cc
 import gin
 import numpy as np

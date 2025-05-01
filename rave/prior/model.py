@@ -180,8 +180,8 @@ class Prior(pl.LightningModule):
         self.log("validation", loss)
         return batch
 
-    def validation_epoch_end(self, out):
-        x = torch.randn_like(self.encode(out[0]))
+    def on_validation_batch_end(self, out, *args, **kwargs):
+        x = torch.randn_like(self.encode(out))
         x = self.quantized_normal.encode(self.diagonal_shift(x))
         z = self.generate(x)
         z = self.diagonal_shift.inverse(self.quantized_normal.decode(z))

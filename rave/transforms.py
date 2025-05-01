@@ -1,4 +1,5 @@
 from random import choice, randint, random, randrange
+import pdb
 import bisect
 import torchaudio
 import gin.torch
@@ -7,8 +8,6 @@ import librosa as li
 import numpy as np
 import torch
 import scipy.signal as signal
-from udls.transforms import *
-
 
 class Transform(object):
     def __call__(self, x: torch.Tensor):
@@ -198,16 +197,3 @@ class FrequencyMasking(Transform):
         return x_inv
             
 
-
-# Utilitary for GIN recording of augmentations
-
-
-_augmentations = []
-
-@gin.configurable()
-def add_augmentation(aug):
-    global _augmentations
-    _augmentations.append(aug)
-
-def get_augmentations():
-    return _augmentations

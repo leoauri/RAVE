@@ -30,6 +30,8 @@ flags.DEFINE_multi_integer('gpu', default=None, help='GPU to use')
 flags.DEFINE_integer('batch', 8, help="batch size")
 flags.DEFINE_integer('n_signal', 0, help="chunk size (default: given by prior config)")
 flags.DEFINE_string('ckpt', default=None, help="checkpoint to resume")
+flags.DEFINE_integer('channels', default=None, help="audio channels")
+flags.DEFINE_float('fidelity', default=0.99, help="prior target fidelity")
 flags.DEFINE_integer('workers',
                      default=8,
                      help='Number of workers to spawn for dataset loading')
@@ -73,7 +75,8 @@ def main(argv):
     if run is None:
         print('no checkpoint found in %s'%FLAGS.model)
         exit()
-    pretrained = rave.RAVE()
+    n_channels = FLAGS.channels or 1
+    pretrained = rave.RAVE(n_channels=n_channels)
     print('model found : %s'%run)
     checkpoint = torch.load(run, map_location='cpu')
     if "EMA" in checkpoint["callbacks"]:
@@ -90,6 +93,7 @@ def main(argv):
     gin.clear_config()
     
     # parse configuration
+    gin.constant('SAMPLE_RATE', pretrained.sr)
     if FLAGS.ckpt:
         config_file = rave.core.search_for_config(FLAGS.ckpt)
         if config_file is None:
@@ -103,7 +107,7 @@ def main(argv):
 
     # create model
     if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):
-        prior = rave.prior.VariationalPrior(pretrained_vae=pretrained)
+        prior = rave.prior.VariationalPrior(pretrained_vae=pretrained, fidelity=FLAGS.fidelity, n_channels=n_channels)
     else:
         raise NotImplementedError("prior not implemented for encoder of type %s"%(type(pretrained.encoder)))
 

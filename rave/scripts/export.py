@@ -48,6 +48,19 @@ flags.DEFINE_float(
     upper_bound=.999,
     help='Fidelity to use during inference (Variational mode only)')
 
+flags.DEFINE_integer(
+    'latent_size',
+    default=None,
+    lower_bound = 0,
+    help = "Defines a fixed latent space for RAVE (overrides --fidelity)"
+)
+
+flags.DEFINE_bool(
+    'no_pca', 
+    default = False,
+    help = "disables PCA in latent space (latent size is forced to 128)"
+)
+
 flags.DEFINE_string('name', 
                      default= None,
                      help = "custom name for the scripted model (default: run name)")
@@ -79,7 +92,8 @@ class ScriptedRAVE(nn_tilde.Module):
                  channels: Optional[int] = None,
                  fidelity: float = .95,
                  target_sr: bool = None, 
-                 prior: prior.Prior = None) -> None:
+                 prior: prior.Prior = None,
+                 latent_size: int = None) -> None:
 
         super().__init__()
         self.pqmf = pretrained.pqmf
@@ -116,26 +130,32 @@ class ScriptedRAVE(nn_tilde.Module):
         self.register_buffer("latent_mean", pretrained.latent_mean)
         self.register_buffer("fidelity", pretrained.fidelity)
 
-        if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):
-            latent_size = max(
-                np.argmax(pretrained.fidelity.numpy() > fidelity), 1)
-            latent_size = 2**math.ceil(math.log2(latent_size))
-            self.latent_size = latent_size
+        if latent_size is None:
+            if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):
+                if fidelity is None:
+                    latent_size = self.full_latent_size
+                else:
+                    latent_size = max(
+                        np.argmax(pretrained.fidelity.numpy() > fidelity), 1)
+                    latent_size = 2**math.ceil(math.log2(latent_size))
 
-        elif isinstance(pretrained.encoder, rave.blocks.DiscreteEncoder):
-            self.latent_size = pretrained.encoder.num_quantizers
+            elif isinstance(pretrained.encoder, rave.blocks.DiscreteEncoder):
+                latent_size = pretrained.encoder.num_quantizers
 
-        elif isinstance(pretrained.encoder, rave.blocks.WasserteinEncoder):
-            self.latent_size = pretrained.latent_size
+            elif isinstance(pretrained.encoder, rave.blocks.WasserteinEncoder):
+                latent_size = pretrained.latent_size
 
-        elif isinstance(pretrained.encoder, rave.blocks.SphericalEncoder):
-            self.latent_size = pretrained.latent_size - 1
+            elif isinstance(pretrained.encoder, rave.blocks.SphericalEncoder):
+                latent_size = pretrained.latent_size - 1
 
+            else:
+                raise ValueError(
+                    f'Encoder type {pretrained.encoder.__class__.__name__} not supported'
+                )
         else:
-            raise ValueError(
-                f'Encoder type {pretrained.encoder.__class__.__name__} not supported'
-            )
+            assert latent_size > 0, "latent_size must be positive."
 
+        self.latent_size = latent_size
         self.fake_adain = rave.blocks.AdaptiveInstanceNormalization(0)
 
         # have to init cached conv before graphing
@@ -210,6 +230,12 @@ class ScriptedRAVE(nn_tilde.Module):
     def pre_process_latent(self, z):
         raise NotImplementedError
 
+    def init_cache(self, x):
+        self.forward(x)
+        if self.pqmf is not None:
+            u = self.pqmf(x.reshape(-1, 1, x.shape[-1]))
+            v = self.pqmf.inverse(u)
+
     def update_adain(self):
         for m in self.modules():
             if isinstance(m, rave.blocks.AdaptiveInstanceNormalization):
@@ -262,8 +288,6 @@ class ScriptedRAVE(nn_tilde.Module):
         z = self.post_process_latent(z)
         return z
 
-    @torch.jit.export
-
 
     @torch.jit.export
     def decode(self, z, from_forward: bool = False):
@@ -280,7 +304,7 @@ class ScriptedRAVE(nn_tilde.Module):
         y = self.decoder(z)
 
         batch_size = z.shape[:-2]
-        if self.pqmf is not None:
+        if self.output_mode == "pqmf":
             y = y.reshape(y.shape[0] * self.n_channels, -1, y.shape[-1])
             y = self.pqmf.inverse(y)
             y = y.reshape(batch_size+(self.n_channels, -1))
@@ -350,26 +374,39 @@ class ScriptedRAVE(nn_tilde.Module):
 
 class VariationalScriptedRAVE(ScriptedRAVE):
 
+    def __init__(self, *args, use_pca=True, **kwargs):
+        self.use_pca = use_pca
+        super(VariationalScriptedRAVE, self).__init__(*args, **kwargs)
+        if self.use_pca:
+            assert self.latent_size < self.full_latent_size, "latent_size must be < %d"%(self.full_latent_size)
+
     def post_process_latent(self, z):
         z = self.encoder.reparametrize(z)[0]
-        z = z - self.latent_mean.unsqueeze(-1)
-        z = F.conv1d(z, self.latent_pca.unsqueeze(-1))
+        if self.use_pca:
+            z = z - self.latent_mean.unsqueeze(-1)
+            z = F.conv1d(z, self.latent_pca.unsqueeze(-1))
         z = z[:, :self.latent_size]
         return z
 
     def pre_process_latent(self, z):
-        noise = torch.randn(
-            z.shape[0],
-            self.full_latent_size - z.shape[1],
-            z.shape[-1],
-        ).type_as(z)
-        z = torch.cat([z, noise], 1)
-        z = F.conv1d(z, self.latent_pca.T.unsqueeze(-1))
-        z = z + self.latent_mean.unsqueeze(-1)
+        if z.shape[1] < self.full_latent_size:
+            noise = torch.randn(
+                z.shape[0],
+                self.full_latent_size - z.shape[1],
+                z.shape[-1],
+            ).type_as(z)
+            z = torch.cat([z, noise], 1)
+        if self.use_pca:
+            z = F.conv1d(z, self.latent_pca.T.unsqueeze(-1))
+            z = z + self.latent_mean.unsqueeze(-1)
         return z
 
 
 class DiscreteScriptedRAVE(ScriptedRAVE):
+
+    def __init__(self, *args, **kwargs):
+        super(DiscreteScriptedRAVE, self).__init__(*args,**kwargs)
+        assert self.latent_size < self.full_latent_size, "latent_size must be < %d"%(self.full_latent_size)
 
     def post_process_latent(self, z):
         z = self.encoder.rvq.encode(z)
@@ -388,6 +425,10 @@ class DiscreteScriptedRAVE(ScriptedRAVE):
 
 class WasserteinScriptedRAVE(ScriptedRAVE):
 
+    def __init__(self, *args, **kwargs):
+        super(WasserteinScriptedRAVE, self).__init__(*args,**kwargs)
+        assert self.latent_size < self.full_latent_size, "latent_size must be < %d"%(self.full_latent_size)
+
     def post_process_latent(self, z):
         return z
 
@@ -400,6 +441,10 @@ class WasserteinScriptedRAVE(ScriptedRAVE):
 
 
 class SphericalScriptedRAVE(ScriptedRAVE):
+
+    def __init__(self, *args, **kwargs):
+        super(SphericalScriptedRAVE, self).__init__(*args,**kwargs)
+        assert self.latent_size < self.full_latent_size, "latent_size must be < %d"%(self.full_latent_size)
 
     def post_process_latent(self, z):
         return rave.blocks.unit_norm_vector_to_angles(z)
@@ -466,7 +511,6 @@ class TraceModel(nn.Module):
         return x
 
 
-
 prior_classes = ['VariationalPrior']
 def get_prior_class_from_config():
     prior_class = None
@@ -500,7 +544,10 @@ def main(argv):
     gin.parse_config_file(config_file)
     FLAGS.run = rave.core.search_for_run(FLAGS.run)
 
-    pretrained = rave.RAVE()
+    output = FLAGS.output or os.path.dirname(FLAGS.run)
+    model_name = FLAGS.name or FLAGS.run.split(os.sep)[-4]
+    
+    pretrained = rave.RAVE(n_channels=FLAGS.channels)
     if FLAGS.run is not None:
         logging.info('model found : %s'%FLAGS.run)
         checkpoint = torch.load(FLAGS.run, map_location='cpu')
@@ -519,8 +566,14 @@ def main(argv):
         exit()
     pretrained.eval()
 
+    class_kwargs = {}
     if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):
         script_class = VariationalScriptedRAVE
+        if FLAGS.no_pca:
+            class_kwargs['use_pca'] = False
+            FLAGS.fidelity = None
+            FLAGS.latent_size = None
+            model_name += "_nopca"
     elif isinstance(pretrained.encoder, rave.blocks.DiscreteEncoder):
         script_class = DiscreteScriptedRAVE
     elif isinstance(pretrained.encoder, rave.blocks.WasserteinEncoder):
@@ -533,8 +586,6 @@ def main(argv):
 
     logging.info("warmup pass")
 
-    x = torch.zeros(1, pretrained.n_channels, 2**14)
-    # pretrained(x)
 
     logging.info("optimize model")
 
@@ -549,11 +600,12 @@ def main(argv):
         else:
             gin.clear_config()
             logging.info("prior config file : ", prior_config_file)
+            gin.constant('SAMPLE_RATE', pretrained.sr)
             gin.parse_config_file(prior_config_file)
             PRIOR = rave.core.search_for_run(FLAGS.prior)
             logging.info(f"using prior model at {PRIOR}")
             prior_class = get_prior_class_from_config()
-            prior_pretrained = getattr(prior, prior_class)(pretrained_vae=pretrained, n_channels=pretrained.n_channels)
+            prior_pretrained = getattr(prior, prior_class)(pretrained_vae=pretrained, n_channels=pretrained.n_channels, latent_size=FLAGS.latent_size, fidelity=FLAGS.fidelity)
             prior_pretrained.load_state_dict(get_state_dict(pretrained, PRIOR))
             prior_scripted = TraceModel(prior_pretrained, pretrained)
 
@@ -568,18 +620,21 @@ def main(argv):
         channels = FLAGS.channels,
         fidelity=FLAGS.fidelity,
         target_sr=FLAGS.sr,
-        prior = prior_scripted
+        prior = prior_scripted,
+        latent_size=FLAGS.latent_size,
+        **class_kwargs
     )
+
+    x = torch.zeros(1, pretrained.n_channels, 2**14)
+    scripted_rave.init_cache(x)
     z = scripted_rave.encode(x)
     x = scripted_rave.decode(z)
 
     logging.info("save model")
-    output = FLAGS.output or os.path.dirname(FLAGS.run)
-    model_name = FLAGS.name or FLAGS.run.split(os.sep)[-4]
+
     if FLAGS.streaming:
         model_name += "_streaming"
     model_name += ".ts"
-
     output = os.path.abspath(output)
     if not os.path.isdir(output):
         os.makedirs(output)

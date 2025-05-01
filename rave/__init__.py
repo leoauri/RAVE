@@ -3,13 +3,20 @@ from pathlib import Path
 import cached_conv as cc
 import gin
 import torch
+import acids_dataset
 
 
 BASE_PATH: Path = Path(__file__).parent
+CUSTOM_PATH: Path = Path(__file__).parent.parent / "configs"
 
 gin.add_config_file_search_path(BASE_PATH)
+gin.add_config_file_search_path(CUSTOM_PATH)
 gin.add_config_file_search_path(BASE_PATH.joinpath('configs'))
+if not BASE_PATH.joinpath('configs', 'augmentations').exists():
+    BASE_PATH.joinpath('configs', 'augmentations').symlink_to(Path(acids_dataset.__file__).parent / "configs" / "transforms")
+
 gin.add_config_file_search_path(BASE_PATH.joinpath('configs', 'augmentations'))
+
 
 
 def __safe_configurable(name):

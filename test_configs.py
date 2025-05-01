@@ -53,15 +53,14 @@ def test_config(config, sr, stereo):
         "CAPACITY=2",
     ])
 
-    n_channels = n_channels = 1 if "mono" else 2
-    model = rave.RAVE(n_channels = n_channels)
+    model = rave.RAVE()
 
     if stereo:
         for m in model.modules():
             if isinstance(m, rave.blocks.AdaptiveInstanceNormalization):
                 pytest.skip()
 
-    x = torch.randn(1, n_channels, 2**15)
+    x = torch.randn(1, 1, 2**15)
     z = model.encode(x)
     y = model.decode(z)
     score = model.discriminator(y)
@@ -80,7 +79,7 @@ def test_config(config, sr, stereo):
         raise ValueError(f"Encoder type {type(model.encoder)} "
                          "not supported for export.")
 
-    x = torch.zeros(1, n_channels, 2**14)
+    x = torch.zeros(1, 1, 2**14)
 
     model(x)
 
@@ -91,7 +90,7 @@ def test_config(config, sr, stereo):
     scripted_rave = script_class(
         pretrained=model,
         stereo=stereo,
-    tests/test_configs.py)
+    )
 
     scripted_rave_resampled = script_class(
         pretrained=model,
