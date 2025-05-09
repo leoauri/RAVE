@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from einops import rearrange
 from scipy.optimize import fmin
-from scipy.signal import firwin, kaiser_beta, kaiserord
+from scipy.signal import firwin, kaiserord
 
 
 def reverse_half(x):
@@ -68,7 +68,6 @@ def kaiser_filter(wc, atten, N=None):
     N = N if N is not None else N_
     h = firwin(N, wc, window=('kaiser', beta), scale=False, fs=np.pi)
     return h
-
 
 def loss_wc(wc, atten, M, N):
     """
@@ -177,7 +176,7 @@ def classic_inverse(x, hk):
 
 
 @torch.fx.wrap
-class PQMF(nn.Module):
+class PQMF(nn.modules.lazy.LazyModuleMixin, nn.Module):
     """
     Pseudo Quadrature Mirror Filter multiband decomposition / reconstruction
     Parameters
@@ -191,25 +190,39 @@ class PQMF(nn.Module):
 
     def __init__(self, attenuation, n_band, polyphase=True, n_channels = 1):
         super().__init__()
-        h = get_prototype(attenuation, n_band)
 
-        if polyphase:
-            power = math.log2(n_band)
+
+        self.hk = nn.UninitializedParameter()
+        self.h = nn.UninitializedParameter()
+        self.attenuation = attenuation
+        self.n_band = n_band
+        self.polyphase = polyphase
+        self.n_channels = n_channels
+
+    def initialize_parameters(self, *args, **kwargs): 
+        h = get_prototype(self.attenuation, self.n_band)
+
+        if self.polyphase:
+            power = math.log2(self.n_band)
             assert power == math.floor(
                 power
             ), "when using the polyphase algorithm, n_band must be a power of 2"
 
         h = torch.from_numpy(h).float()
-        hk = get_qmf_bank(h, n_band)
+        hk = get_qmf_bank(h, self.n_band)
         hk = center_pad_next_pow_2(hk)
+        self.h.materialize(h.shape)
+        self.h.data.copy_(h)
+        self.hk.materialize(hk.shape)
+        self.hk.data.copy_(hk)
 
-        self.register_buffer("hk", hk)
-        self.register_buffer("h", h)
-        self.n_band = n_band
-        self.polyphase = polyphase
-        self.n_channels = n_channels
+    def initialized(self): 
+        return not (isinstance(self.h, nn.UninitializedParameter) or isinstance(self.hk, nn.UninitializedParameter))
 
     def forward(self, x):
+        if not self.initialized():
+            self._init_buffers()
+
         if x.ndim == 2:
             return torch.stack([self.forward(x[i]) for i in range(x.shape[0])])
         if self.n_band == 1:
@@ -224,6 +237,8 @@ class PQMF(nn.Module):
         return x
 
     def inverse(self, x):
+        if not self.initialized():
+            self._init_buffers()
         if x.ndim == 2:
             if self.n_channels == 1:
                 return self.inverse(x[0]).unsqueeze(0)
@@ -246,43 +261,70 @@ class CachedPQMF(PQMF):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.hkf = nn.UninitializedParameter()
+        self.hki = nn.UninitializedParameter()
 
-        hkf = make_odd(self.hk).unsqueeze(1)
+    def initialize_parameters(self, *args, **kwargs):
+        if not PQMF.initialized(self):
+            PQMF.initialize_parameters(self)
+        
+        if not self.initialized():
+            hkf = make_odd(self.hk).unsqueeze(1)
+            self.hkf.materialize(hkf.shape)
+            self.hkf.data.copy_(hkf)
 
-        hki = self.hk.flip(-1)
-        hki = rearrange(hki, "c (t m) -> m c t", m=self.hk.shape[0])
-        hki = make_odd(hki)
+            hki = self.hk.flip(-1)
+            hki = rearrange(hki, "c (t m) -> m c t", m=self.hk.shape[0])
+            hki = make_odd(hki)
+            self.hki.materialize(hki.shape)
+            self.hki.data.copy_(hki)
 
-        self.forward_conv = cc.Conv1d(
-            hkf.shape[1],
-            hkf.shape[0],
-            hkf.shape[2],
-            padding=cc.get_padding(hkf.shape[-1]),
-            stride=hkf.shape[0],
-            bias=False,
-        )
-        self.forward_conv.weight.data.copy_(hkf)
+        if not hasattr(self, "forward_conv"):
+            self.forward_conv = cc.Conv1d(
+                hkf.shape[1],
+                hkf.shape[0],
+                hkf.shape[2],
+                padding=cc.get_padding(hkf.shape[-1]),
+                stride=hkf.shape[0],
+                bias=False,
+            )
 
-        self.inverse_conv = cc.Conv1d(
-            hki.shape[1],
-            hki.shape[0],
-            hki.shape[-1],
-            padding=cc.get_padding(hki.shape[-1]),
-            bias=False,
-        )
-        self.inverse_conv.weight.data.copy_(hki)
+        if not hasattr(self, "inverse_conv"):
+            self.inverse_conv = cc.Conv1d(
+                hki.shape[1],
+                hki.shape[0],
+                hki.shape[-1],
+                padding=cc.get_padding(hki.shape[-1]),
+                bias=False,
+            )
+
+    def state_dict(self, *args, **kwargs): 
+        state_dict = super().state_dict()
+        for k in dict(self.forward_conv.named_parameters()).keys():
+            del state_dict[f'forward_conv.{k}']
+        for k in dict(self.inverse_conv.named_parameters()).keys():
+            del state_dict[f'inverse_conv.{k}']
+        return state_dict
+
+
+    def initialized(self):
+        return super().initialized() and (not isinstance(self.hkf, torch.nn.UninitializedParameter)) and (not isinstance(self.hki, torch.nn.UninitializedParameter))
 
     def script_cache(self):
         self.forward_conv.script_cache()
         self.inverse_conv.script_cache()
 
     def forward(self, x):
+        if not self.initialized():
+            self._init_buffers()
         if self.n_band == 1: return x
         x = self.forward_conv(x)
         x = reverse_half(x)
         return x
 
     def inverse(self, x):
+        if not self.initialized():
+            self._init_buffers()
         if self.n_band == 1: return x
         x = reverse_half(x)
         m = self.hk.shape[0]
