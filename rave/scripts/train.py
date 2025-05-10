@@ -51,7 +51,7 @@ flags.DEFINE_integer('val_every', 10000, help='Checkpoint model every n steps')
 flags.DEFINE_integer('save_every',
                      500000,
                      help='save every n steps (default: just last)')
-flags.DEFINE_multi_string('seed',
+flags.DEFINE_integer('seed',
                            default = 0,
                            help = 'augmentation configurations to use')                    
 flags.DEFINE_integer('n_signal',
@@ -87,7 +87,6 @@ flags.DEFINE_bool('smoke_test',
                   help="Run training with n_batches=1 to test the model")
 flags.DEFINE_bool('allow_partial_resume', default=False, help="allow partial resuming of a checkpoint")
 
-torch.manual_seed(FLAGS.seed)
 
 class EMA(pl.Callback):
 
@@ -130,37 +129,26 @@ class EMA(pl.Callback):
     def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
         self.weights.update(state_dict)
 
-def add_gin_extension(config_name: str) -> str:
-    if config_name[-4:] != '.gin':
-        config_name += '.gin'
-    return config_name
-
-def parse_augmentations(augmentations, sr):
-    for a in augmentations:
-        with ad.GinEnv(paths=[Path(rave.__file__).parent / "configs" / "augmentations"]):
-            gin.parse_config_file(a)
-            parse_transform()
-            gin.clear_config()
-    return get_augmentations()
-
 def main(argv):
     torch.set_float32_matmul_precision('high')
+    torch.manual_seed(FLAGS.seed)
     torch.backends.cudnn.benchmark = True
 
     # check dataset channels
     n_channels = rave.dataset.get_training_channels(FLAGS.db_path, FLAGS.channels)
     FLAGS.override.append('RAVE.n_channels=%d'%n_channels)
-
+    
     # parse configuration
     if FLAGS.ckpt:
         config_file = rave.core.search_for_config(FLAGS.ckpt)
         if config_file is None:
             logging.error('Config file not found in %s'%FLAGS.run)
             exit()
-        gin.parse_config_files_and_bindings([config_file], FLAGS.override)
+        FLAGS.config = list(filter(lambda x: x in rave.RAVE_OVERRIDE_CONFIGS, map(add_gin_extension, FLAGS.config)))
+        gin.parse_config_files_and_bindings([config_file] + FLAGS.config, FLAGS.override)
     else:
         gin.parse_config_files_and_bindings(
-            map(add_gin_extension, FLAGS.config),
+            map(rave.add_gin_extension, FLAGS.config),
             FLAGS.override,
         )
 
@@ -178,7 +166,7 @@ def main(argv):
     
     # parse augmentations
     with gin.unlock_config():
-        augmentations = parse_augmentations(map(add_gin_extension, FLAGS.augment), sr=model.sr)
+        augmentations = rave.parse_augmentations(map(rave.add_gin_extension, FLAGS.augment), sr=model.sr)
         gin.bind_parameter('dataset.get_dataset.augmentations', augmentations)
 
     # parse datasset

@@ -1,0 +1,11 @@
+from __gin__ import dynamic_registration
+
+import rave
+from rave import model
+
+rave.RAVE: 
+    no_freeze_when_warmed_up = True 
+
+model.WarmupCallback:
+    adversarial_at_start = True
+

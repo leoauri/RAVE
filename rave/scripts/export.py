@@ -704,17 +704,20 @@ def main(argv):
 
     logging.info("building rave")
 
-    config_file = rave.core.search_for_config(FLAGS.run)
-    if config_file is None:
-        print('Config file not found in %s'%FLAGS.run)
-    gin.parse_config_file(config_file)
-    FLAGS.run = rave.core.search_for_run(FLAGS.run)
+    # config_file = rave.core.search_for_config(FLAGS.run)
+    # if config_file is None:
+    #     print('Config file not found in %s'%FLAGS.run)
+    # gin.parse_config_file(config_file)
+    # FLAGS.run = rave.core.search_for_run(FLAGS.run)
 
+    try:
+        pretrained, model_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights)
+    except: 
+        pretrained, model_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights, name=None)
+    pretrained.eval()
     output = FLAGS.output or os.path.dirname(FLAGS.run)
     model_name = FLAGS.name or FLAGS.run.split(os.sep)[-4]
     
-    pretrained, model_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights)
-    pretrained.eval()
 
     class_kwargs = {}
     if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):

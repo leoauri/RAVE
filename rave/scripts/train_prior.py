@@ -40,7 +40,9 @@ flags.DEFINE_integer('save_every',
                      help='save every n steps (default: just last)')
 flags.DEFINE_integer('max_steps', default=1000000, help="max training steps")
 flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
-
+flags.DEFINE_integer('seed',
+                    default = 0,
+                    help = 'augmentation configurations to use')  
 flags.DEFINE_bool('derivative',
                   default=False,
                   help='Train RAVE on the derivative of the signal')
@@ -64,7 +66,7 @@ def add_gin_extension(config_name: str) -> str:
 
 
 def main(argv):
-
+    torch.manual_seed(FLAGS.seed)
     # load pretrained RAVE
     pretrained, run_path = rave.load_rave_checkpoint(FLAGS.model)
     n_channels = getattr(pretrained, "n_channels", 1)

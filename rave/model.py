@@ -169,6 +169,7 @@ class RAVE(pl.LightningModule):
         enable_pqmf_encode: Optional[bool] = None,
         enable_pqmf_decode: Optional[bool] = None,
         is_mel_input: Optional[bool] = None,
+        no_freeze_when_warmed_up: bool = False, 
         loss_weights = None
     ):
         super().__init__()
@@ -191,7 +192,7 @@ class RAVE(pl.LightningModule):
         assert weights is not None, "RAVE model requires either weights or loss_weights (depreciated) keyword"
 
         # setup model
-        self.encoder = encoder(n_channels=n_channels)
+        self.encoder = encoder(n_channels=n_channels, no_freeze_when_warmed_up=no_freeze_when_warmed_up)
         self.decoder = decoder(n_channels=n_channels)
         self.discriminator = discriminator(n_channels=n_channels)
 

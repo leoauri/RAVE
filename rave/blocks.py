@@ -751,11 +751,12 @@ class GeneratorV2(nn.Module):
 
 class VariationalEncoder(nn.Module):
 
-    def __init__(self, encoder, beta: float = 1.0, n_channels=1):
+    def __init__(self, encoder, beta: float = 1.0, n_channels=1, no_freeze_when_warmed_up=False):
         super().__init__()
         self.encoder = encoder(n_channels=n_channels)
         self.beta = beta
         self.register_buffer("warmed_up", torch.tensor(0))
+        self.no_freeze_when_warmed_up = no_freeze_when_warmed_up
 
     def reparametrize(self, z, temperature: float = 1.):
         mean, scale = z.chunk(2, 1)
@@ -775,7 +776,7 @@ class VariationalEncoder(nn.Module):
     def forward(self, x: torch.Tensor):
         z = self.encoder(x)
 
-        if self.warmed_up:
+        if self.warmed_up and not self.no_freeze_when_warmed_up:
             z = z.detach()
         return z
 
@@ -786,12 +787,15 @@ class WasserteinEncoder(nn.Module):
         self,
         encoder_cls,
         noise_augmentation: int = 0,
-        n_channels: int = 1
+        n_channels: int = 1,
+        no_freeze_when_warmed_up = False
     ):
         super().__init__()
         self.encoder = encoder_cls(n_channels=n_channels)
         self.register_buffer("warmed_up", torch.tensor(0))
         self.noise_augmentation = noise_augmentation
+
+        self.no_freeze_when_warmed_up = no_freeze_when_warmed_up
 
     def compute_mean_kernel(self, x, y):
         kernel_input = (x[:, None] - y[None]).pow(2).mean(2) / x.shape[-1]
@@ -819,7 +823,7 @@ class WasserteinEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor):
         z = self.encoder(x)
-        if self.warmed_up:
+        if self.warmed_up and not self.no_freeze_when_warmed_up:
             z = z.detach()
         return z
 
@@ -831,7 +835,8 @@ class DiscreteEncoder(nn.Module):
                  vq_cls,
                  num_quantizers,
                  noise_augmentation: int = 0,
-                 n_channels: int = 1):
+                 n_channels: int = 1,
+                 no_freeze_when_warmed_up = False):
         super().__init__()
         self.encoder = encoder_cls(n_channels=n_channels)
         self.rvq = vq_cls()
@@ -839,6 +844,7 @@ class DiscreteEncoder(nn.Module):
         self.register_buffer("warmed_up", torch.tensor(0))
         self.register_buffer("enabled", torch.tensor(0))
         self.noise_augmentation = noise_augmentation
+        self.no_freeze_when_warmed_up = no_freeze_when_warmed_up
 
     @torch.jit.ignore
     def reparametrize(self, z):
@@ -865,9 +871,10 @@ class DiscreteEncoder(nn.Module):
 
 class SphericalEncoder(nn.Module):
 
-    def __init__(self, encoder_cls: Callable[[], nn.Module], n_channels: int = 1) -> None:
+    def __init__(self, encoder_cls: Callable[[], nn.Module], n_channels: int = 1, no_freeze_when_warmed_up = False) -> None:
         super().__init__()
         self.encoder = encoder_cls(n_channels=n_channels)
+        self.no_freeze_when_warmed_up = no_freeze_when_warmed_up
 
     def reparametrize(self, z):
         norm_z = z / torch.norm(z, p=2, dim=1, keepdim=True)

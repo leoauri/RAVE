@@ -108,22 +108,27 @@ def main(argv):
     assert os.path.exists(FLAGS.model), f"{FLAGS.model} not found"
     if os.path.splitext(FLAGS.model)[1] == ".ts":
         rave_model = torch.jit.load(FLAGS.model)
-        embedding_name = FLAGS.embedding_name or os.path.splitext(os.path.basename(FLAGS.model))
-        z_downsample = rave_model.encode_params[1]
-        z_shape = rave_model.encode_params[2]
+        rave_sr = rave_model.sr
+        embedding_name = FLAGS.embedding_name or os.path.splitext(os.path.basename(FLAGS.model))[0]
+        z_downsample = int(rave_model.encode_params[3])
+        z_shape = int(rave_model.encode_params[2])
+        encode_method = "encode"
         method_kwargs = {}
         logging.info(f"Model found at {FLAGS.model}, dim={z_shape}, ratio={z_downsample}")
     else: 
-        rave_model, run_path = rave.load_rave_checkpoint(FLAGS.model)
-        embedding_name = FLAGS.embedding_name or rave.get_run_name(run_path)
-        logging.info('model found : %s'%run_path)
-        rave_sr = rave_model.sr
-        z_shape = rave_model.latent_size_from_fidelity(FLAGS.fidelity)
-        # compute z downsampling
-        z = rave_model.encode(torch.randn(1, 1, 4096))
-        z_downsample = 4096 // z.shape[-1]
-        method_kwargs = {'fidelity': FLAGS.fidelity}
-        logging.info(f"Model found at {run_path}, dim={z_shape}, ratio={z_downsample}")
+        #TODO the decode function is called directly in AFTER, such that we cannot make a custom callback
+        raise RuntimeError("Please export the model as a .ts before training an AFTER model.")
+        # rave_model, run_path = rave.load_rave_checkpoint(FLAGS.model)
+        # embedding_name = FLAGS.embedding_name or rave.get_run_name(run_path)
+        # logging.info('model found : %s'%run_path)
+        # encode_method = "encode_compressed"
+        # rave_sr = rave_model.sr
+        # z_shape = rave_model.latent_size_from_fidelity(FLAGS.fidelity)
+        # # compute z downsampling
+        # z = rave_model.encode(torch.randn(1, 1, 4096))
+        # z_downsample = 4096 // z.shape[-1]
+        # method_kwargs = {'fidelity': FLAGS.fidelity}
+        # logging.info(f"Model found at {run_path}, dim={z_shape}, ratio={z_downsample}")
 
     #
     # [Second step] init augmentation transforms
@@ -147,7 +152,7 @@ def main(argv):
             elif (FLAGS.shift):
                 augment_transforms.append([*rave_transforms, *stretch_transform])
     embedding_feature = ModuleEmbedding(module=rave_model, module_sr=rave_model.sr, 
-                                        method="encode_compressed", method_kwargs=method_kwargs, 
+                                        method=encode_method, method_kwargs=method_kwargs, 
                                         name=embedding_name, transforms=augment_transforms, device=device) 
     logging.info("Resulting embedding transform : %s..."%embedding_feature)
 
@@ -256,6 +261,7 @@ def main(argv):
         gin.bind_parameter("%IN_SIZE", z_shape)
         gin.bind_parameter("%N_SIGNAL", n_after_latents)
 
+    rave_model = rave_model.to('cpu')
     if FLAGS.arch == "rectified":
         after_model = RectifiedFlow(device=device, emb_model=rave_model, time_transform=time_transform)
     elif FLAGS.arch == "edm":

@@ -28,6 +28,14 @@ def main():
         from rave.scripts import train
         sys.argv[0] = train.__name__
         app.run(train.main)
+    elif command == 'transfer':
+        from rave.scripts import transfer
+        sys.argv[0] = train.__name__
+        app.run(transfer.main)
+    elif command == 'adapt':
+        from rave.scripts import adapt
+        sys.argv[0] = train.__name__
+        app.run(transfer.adapt)
     elif command == 'train_prior':
         from rave.scripts import train_prior
         sys.argv[0] = train_prior.__name__
