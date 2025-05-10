@@ -1,23 +1,37 @@
 from functools import partial
-from typing import Callable, Optional, Sequence, Union
+from typing import Callable, Optional, Sequence, Union, Any
+import torch
 
+import torch.nn as nn
 try:
     import torchbend as tb
 except ModuleNotFoundError:
+    @torch.jit.ignore
+    def mark_fn(obj, *args, **kwargs):
+        if obj is None: 
+            return lambda x: x
+        else:
+            return obj
+
     class MarkPlaceholder:
+
         @staticmethod
-        def mark(*args, **kwargs):
-            if len(args) > 0:
-                return args[0]
-            else:
-                return lambda x: x
+        def mark(obj: Optional[Any] = None, name: Optional[str] = None, mode: Optional[str] = "post") -> torch.Tensor:
+            if torch.jit.is_scripting() or torch.jit.is_tracing():
+                if torch.jit.isinstance(obj, torch.Tensor):
+                    return obj
+                else: 
+                    raise RuntimeError("when scripting, torchbend marking is only scriptable with tensors")
+            else: 
+                return mark_fn(obj, name, mode)
+                
+
+
     tb = MarkPlaceholder
 
 import cached_conv as cc
 import gin
 import numpy as np
-import torch
-import torch.nn as nn
 from torch.nn.utils import weight_norm
 from torchaudio.transforms import Spectrogram
 
@@ -743,13 +757,13 @@ class VariationalEncoder(nn.Module):
         self.beta = beta
         self.register_buffer("warmed_up", torch.tensor(0))
 
-    def reparametrize(self, z):
+    def reparametrize(self, z, temperature: float = 1.):
         mean, scale = z.chunk(2, 1)
         std = nn.functional.softplus(scale) + 1e-4
         var = std * std
         logvar = torch.log(var)
 
-        z = torch.randn_like(mean) * std + mean
+        z = torch.randn_like(mean) * temperature * std + mean
         kl = (mean * mean + var - logvar - 1).sum(1).mean()
 
         return z, self.beta * kl

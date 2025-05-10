@@ -225,3 +225,18 @@ class VariationalPrior(Prior):
         z = F.conv1d(z, self.synth.latent_pca.T.unsqueeze(-1))
         z = z + self.synth.latent_mean.unsqueeze(-1)
         return z
+
+
+
+@gin.configurable
+class WassersteinPrior(Prior):
+
+    def post_process_latent(self, z):
+        return z
+
+    def pre_process_latent(self, z):
+        if self.encoder.noise_augmentation:
+            noise = torch.randn(z.shape[0], self.encoder.noise_augmentation,
+                                z.shape[-1]).type_as(z)
+            z = torch.cat([z, noise], 1)
+        return z

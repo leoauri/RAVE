@@ -176,7 +176,7 @@ def classic_inverse(x, hk):
 
 
 @torch.fx.wrap
-class PQMF(nn.modules.lazy.LazyModuleMixin, nn.Module):
+class PQMF(nn.Module):
     """
     Pseudo Quadrature Mirror Filter multiband decomposition / reconstruction
     Parameters
@@ -192,16 +192,11 @@ class PQMF(nn.modules.lazy.LazyModuleMixin, nn.Module):
         super().__init__()
 
 
-        self.hk = nn.UninitializedParameter()
-        self.h = nn.UninitializedParameter()
         self.attenuation = attenuation
         self.n_band = n_band
         self.polyphase = polyphase
         self.n_channels = n_channels
-
-    def initialize_parameters(self, *args, **kwargs): 
         h = get_prototype(self.attenuation, self.n_band)
-
         if self.polyphase:
             power = math.log2(self.n_band)
             assert power == math.floor(
@@ -211,17 +206,24 @@ class PQMF(nn.modules.lazy.LazyModuleMixin, nn.Module):
         h = torch.from_numpy(h).float()
         hk = get_qmf_bank(h, self.n_band)
         hk = center_pad_next_pow_2(hk)
-        self.h.materialize(h.shape)
-        self.h.data.copy_(h)
-        self.hk.materialize(hk.shape)
-        self.hk.data.copy_(hk)
+        self.register_buffer("hk", hk)
+        self.register_buffer("h", h)
 
     def initialized(self): 
         return not (isinstance(self.h, nn.UninitializedParameter) or isinstance(self.hk, nn.UninitializedParameter))
 
+    def _load_from_state_dict(self, 
+                            local_state_dict,
+                            prefix,
+                            local_metadata,
+                            strict,
+                            missing_keys,
+                            unexpected_keys,
+                            error_msgs):
+        self.h = nn.Parameter(local_state_dict[f'{prefix}h'])
+        self.hk = nn.Parameter(local_state_dict[f'{prefix}hk'])
+
     def forward(self, x):
-        if not self.initialized():
-            self._init_buffers()
 
         if x.ndim == 2:
             return torch.stack([self.forward(x[i]) for i in range(x.shape[0])])
@@ -261,70 +263,89 @@ class CachedPQMF(PQMF):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.hkf = nn.UninitializedParameter()
-        self.hki = nn.UninitializedParameter()
+        hkf = make_odd(self.hk).unsqueeze(1)
+        hki = self.hk.flip(-1)
+        hki = rearrange(hki, "c (t m) -> m c t", m=self.hk.shape[0])
+        hki = make_odd(hki)
 
-    def initialize_parameters(self, *args, **kwargs):
-        if not PQMF.initialized(self):
-            PQMF.initialize_parameters(self)
-        
-        if not self.initialized():
-            hkf = make_odd(self.hk).unsqueeze(1)
-            self.hkf.materialize(hkf.shape)
-            self.hkf.data.copy_(hkf)
+        self.forward_conv = cc.Conv1d(
+            hkf.shape[1],
+            hkf.shape[0],
+            hkf.shape[2],
+            padding=cc.get_padding(hkf.shape[-1]),
+            stride=hkf.shape[0],
+            bias=False,
+        )
+        self.forward_conv.weight.data.copy_(hkf.data)
+        self.inverse_conv = cc.Conv1d(
+            hki.shape[1],
+            hki.shape[0],
+            hki.shape[-1],
+            padding=cc.get_padding(hki.shape[-1]),
+            bias=False,
+        )
+        self.inverse_conv.weight.data.copy_(hki.data)
 
-            hki = self.hk.flip(-1)
-            hki = rearrange(hki, "c (t m) -> m c t", m=self.hk.shape[0])
-            hki = make_odd(hki)
-            self.hki.materialize(hki.shape)
-            self.hki.data.copy_(hki)
-
-        if not hasattr(self, "forward_conv"):
+    def _load_from_state_dict(self, 
+                              local_state_dict,
+                              prefix,
+                              local_metadata,
+                              strict,
+                              missing_keys,
+                              unexpected_keys,
+                              error_msgs):
+        self.h = nn.Parameter(local_state_dict[f'{prefix}h'])
+        self.hk = nn.Parameter(local_state_dict[f'{prefix}hk'])
+        forward_weight = local_state_dict.get(f'{prefix}forward_conv.weight')
+        if forward_weight is not None:
             self.forward_conv = cc.Conv1d(
-                hkf.shape[1],
-                hkf.shape[0],
-                hkf.shape[2],
-                padding=cc.get_padding(hkf.shape[-1]),
-                stride=hkf.shape[0],
-                bias=False,
-            )
-
-        if not hasattr(self, "inverse_conv"):
+                    forward_weight.shape[1],
+                    forward_weight.shape[0],
+                    forward_weight.shape[2],
+                    padding=cc.get_padding(forward_weight.shape[-1]),
+                    stride=forward_weight.shape[0],
+                    bias=False,
+                )
+            self.forward_conv.weight.data.copy_(forward_weight.data)
+            
+        inverse_weight = local_state_dict.get(f'{prefix}inverse_conv.weight') 
+        if inverse_weight is not None:
             self.inverse_conv = cc.Conv1d(
-                hki.shape[1],
-                hki.shape[0],
-                hki.shape[-1],
-                padding=cc.get_padding(hki.shape[-1]),
-                bias=False,
-            )
+                    inverse_weight.shape[1],
+                    inverse_weight.shape[0],
+                    inverse_weight.shape[2],
+                    padding=cc.get_padding(inverse_weight.shape[-1]),
+                    bias=False,
+                )
+            self.inverse_conv.weight.data.copy_(inverse_weight.data)
+            
 
-    def state_dict(self, *args, **kwargs): 
-        state_dict = super().state_dict()
-        for k in dict(self.forward_conv.named_parameters()).keys():
-            del state_dict[f'forward_conv.{k}']
-        for k in dict(self.inverse_conv.named_parameters()).keys():
-            del state_dict[f'inverse_conv.{k}']
-        return state_dict
+    # def state_dict(self, *args, **kwargs): 
+    #     state_dict = super().state_dict()
+    #     if hasattr(self.forward_conv):
+    #         for k in dict(self.forward_conv.named_parameters()).keys():
+    #             del state_dict[f'forward_conv.{k}']
+    #     if hasattr(self, self.inverse_conv):
+    #         for k in dict(self.inverse_conv.named_parameters()).keys():
+    #             del state_dict[f'inverse_conv.{k}']
+    #     return state_dict
 
 
     def initialized(self):
-        return super().initialized() and (not isinstance(self.hkf, torch.nn.UninitializedParameter)) and (not isinstance(self.hki, torch.nn.UninitializedParameter))
+        return super().initialized() and hasattr(self, "forward_conv") and hasattr(self, "inverse_conv")
 
     def script_cache(self):
         self.forward_conv.script_cache()
         self.inverse_conv.script_cache()
+    
 
     def forward(self, x):
-        if not self.initialized():
-            self._init_buffers()
         if self.n_band == 1: return x
         x = self.forward_conv(x)
         x = reverse_half(x)
         return x
 
     def inverse(self, x):
-        if not self.initialized():
-            self._init_buffers()
         if self.n_band == 1: return x
         x = reverse_half(x)
         m = self.hk.shape[0]

@@ -1,4 +1,5 @@
 import json
+from typing import List
 import os
 from pathlib import Path
 from random import random
@@ -16,6 +17,7 @@ import torchaudio
 from einops import rearrange
 from scipy.signal import lfilter
 from torch import hann_window
+import sys, multiprocessing
 
 
 def mod_sigmoid(x):
@@ -111,19 +113,26 @@ def search_for_config(folder):
 
     
 
-def search_for_run(run_path, name=None):
+def search_for_run(run_path, name="last.ckpt"):
     if run_path is None: return None
-    if ".ckpt" in run_path: return run_path
-    ckpts = get_ckpts(run_path)
+    run_path = Path(run_path)
+    if run_path.suffix == ".ckpt": return run_path
+    ckpts = get_ckpts(str(run_path))
     if len(ckpts) != 0:
+        if name is None: 
+            ordered = sorted(ckpts, key=os.path.getctime, reverse=True)
+            return ordered[0]
+        else:
+            ckpts = list(filter(lambda x: os.path.basename(x) == name, ckpts))
+            if len(ckpts) == 0: 
+                print('No checkpoint found with name %s'%name)
+                return
+            return ckpts[0]
         return ckpts[-1]
     else:
         print('No checkpoint found')
     return None
 
-
-def setup_gpu():
-    return gpu.getAvailable(maxMemory=.05)
 
 
 def get_beta_kl(step, warmup, min_beta, max_beta):
@@ -563,3 +572,66 @@ def get_valid_extensions():
     elif backend == "soundfile":
         return ['.wav', '.flac', '.ogg', '.aiff', '.aif', '.aifc']
 
+accelerator_map = {
+    'cpu': pl.accelerators.CPUAccelerator, 
+    'cuda': pl.accelerators.CUDAAccelerator, 
+    'tpu': pl.accelerators.XLAAccelerator,
+    'hpu': pl.accelerators.XLAAccelerator,
+    'mps': pl.accelerators.MPSAccelerator 
+
+}
+
+def get_auto_device():
+    for available_accelerator in ['tpu', 'cuda', 'mps', 'cpu']:
+        if accelerator_map[available_accelerator].is_available(): 
+            break
+    return [available_accelerator]
+
+def setup_gpu():
+    return gpu.getAvailable(maxMemory=.05)
+
+
+def get_training_device(devices: str | List[str], allow_multi: bool = False):
+    if not isinstance(devices, list): 
+        devices = [devices]
+    if devices == ["auto"]: 
+        devices = get_auto_device()
+    device_type = set([d.split(':')[0] for d in devices])
+    if len(device_type) != 1: 
+        raise RuntimeError('Please give only one type for devices. Got : %s'%device_type)
+    device_type = list(device_type)[0]
+    assert accelerator_map[device_type].is_available()
+    if device_type == "cpu": 
+        return "cpu", []
+    elif device_type == "cuda":
+        if devices[0] == "cuda": 
+            cuda_idx = setup_gpu()[0]
+            os.environ['CUDA_VISIBLE_DEVICES'] = str(cuda_idx)
+            return "cuda", 1
+        else:
+            idxs = [d.split(':')[1] for d in devices]
+            assert not "" in idxs, "found \"cuda\" in %s"%devices
+            assert allow_multi
+            os.environ['CUDA_VISIBLE_DEVICES'] = ",".join(idxs)
+            return "cuda", len(idxs)
+    elif device_type in ["tpu", "hpu"]:
+        if len(devices) > 1: assert allow_multi
+        return device_type, len(devices)
+    elif device_type == "mps":
+        return "mps", 1
+
+
+def get_workers(workers):
+    # get data-loader
+    if os.name == "nt" or sys.platform == "darwin":
+        #TODO re-check
+        num_workers = 0
+    else:
+        if workers is None: 
+            num_workers = multiprocessing.cpu_count()
+        elif workers <= 0:
+            num_workers = 0 
+        else:
+            num_workers = workers
+    return num_workers
+    

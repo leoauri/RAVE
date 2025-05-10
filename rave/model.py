@@ -1,4 +1,5 @@
 import math
+import os
 from time import time
 from typing import Callable, Optional, Iterable, Dict
 
@@ -41,17 +42,24 @@ class Profiler:
         rep += 80 * "=" + "\n\n\n"
         return rep
 
-
+@gin.configurable
 class WarmupCallback(pl.Callback):
 
-    def __init__(self) -> None:
+    def __init__(self, adversarial_at_start: bool = False) -> None:
         super().__init__()
+        self.adversarial_at_start = adversarial_at_start
         self.state = {'training_steps': 0}
 
     def on_train_batch_start(self, trainer, pl_module, batch,
                              batch_idx) -> None:
-        if self.state['training_steps'] >= pl_module.warmup:
+        if self.adversarial_at_start and not pl_module.warmed_up:
             pl_module.warmed_up = True
+        if not pl_module.warmed_up and self.state['training_steps'] >= pl_module.warmup:
+            pl_module.warmed_up = True
+            checkpoint_path = os.path.join(trainer.log_dir, "checkpoints")
+            os.makedirs(checkpoint_path, exist_ok=True)
+            checkpoint_path = os.path.join(checkpoint_path, "pre_warmup.ckpt")
+            trainer.save_checkpoint(checkpoint_path)
         self.state['training_steps'] += 1
 
     def state_dict(self):
@@ -93,7 +101,6 @@ class BetaWarmupCallback(pl.Callback):
                              batch_idx) -> None:
         self.state['training_steps'] += 1
         if self.state["training_steps"] >= self.warmup_len:
-            pl_module.beta_factor = self.target_value
             return
 
         warmup_ratio = self.state["training_steps"] / self.warmup_len
@@ -255,6 +262,37 @@ class RAVE(pl.LightningModule):
             else:
                 x_multiband = _pqmf_encode(self.pqmf, x_enc)
                 return z, x_multiband
+        return z
+
+    def latent_size_from_fidelity(self, fidelity):
+        if isinstance(self.encoder, rave.blocks.VariationalEncoder):
+            if fidelity is None:
+                latent_size = self.full_latent_size
+            else:
+                latent_size = max(
+                    np.argmax(self.fidelity.cpu().numpy() > fidelity), 1)
+                latent_size = 2**math.ceil(math.log2(latent_size))
+
+        elif isinstance(self.encoder, rave.blocks.DiscreteEncoder):
+            latent_size = self.encoder.num_quantizers
+
+        elif isinstance(self.encoder, rave.blocks.WasserteinEncoder):
+            latent_size = self.latent_size
+
+        elif isinstance(self.encoder, rave.blocks.SphericalEncoder):
+            latent_size = self.latent_size - 1
+        
+        else:
+            raise TypeError('Cannot get latent size from encoder : %s'%(self.latent_size))
+
+        return latent_size
+
+    def encode_compressed(self, x, fidelity = 0.99):
+        z = self.encode(x, return_mb=False)
+        z = self.encoder.reparametrize(z)[0] 
+        z = z - self.latent_mean.unsqueeze(-1)
+        z = torch.nn.functional.conv1d(z, self.latent_pca.unsqueeze(-1))
+        z = z[:, :self.latent_size_from_fidelity(fidelity)]
         return z
 
     def decode(self, z):

@@ -7,25 +7,29 @@ import acids_dataset as ad
 from scipy.signal import lfilter
 
 
-
-
-@gin.configurable
+@gin.configurable(module="data")
 def split_dataset(dataset, 
                   partition: str | None = None, 
                   percent: float | None = None, 
                   features: str | List[str] | None = None, 
-                  balance_cardinality: bool = False, 
-                  max_residual: int | None = None):
+                  balance_cardinality: bool = True, 
+                  max_residual: int | None = None,
+                  training_name: str | None = None):
     if partition is not None:
         assert percent is None, "either percent or partition keyword must be given."
         partdict = dataset.load_partition(partition)
+    elif (training_name is not None) and (dataset.has_partition(training_name)): 
+        partdict = dataset.load_partition(training_name)
     else: 
         split1 = max((percent * len(dataset)) // 100, 1)
         split2 = len(dataset) - split1
         if max_residual is not None:
             split2 = min(max_residual, split2)
             split1 = len(dataset) - split2
-        partdict = dataset.split(partitions={'train': split1 / len(dataset), 'test': split2 / len(dataset)}, features=features, balance_cardinality=balance_cardinality)
+        partdict = dataset.split(partitions={'train': split1 / len(dataset), 'test': split2 / len(dataset)}, 
+                                 features=features, 
+                                 balance_cardinality=balance_cardinality,
+                                 write=training_name)
     return partdict['train'], partdict['test']
 
 
@@ -69,7 +73,7 @@ def get_dataset(db_path,
     return ad.datasets.AudioDataset(
         db_path,
         transforms=transform_list,
-        n_channels=n_channels
+        channels=n_channels
     )
 
 

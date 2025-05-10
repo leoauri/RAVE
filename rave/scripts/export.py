@@ -1,4 +1,5 @@
 import logging
+
 import pdb
 import math
 import os
@@ -12,6 +13,7 @@ import torch
 
 torch.set_grad_enabled(False)
 
+import acids_dataset as ad
 import cached_conv as cc
 import gin
 import nn_tilde
@@ -19,7 +21,7 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 from absl import flags, app
-from typing import Union, Optional
+from typing import Union, Optional, Tuple
 
 try:
     import rave
@@ -70,9 +72,6 @@ flags.DEFINE_string('output',
 flags.DEFINE_bool('ema_weights',
                   default=False,
                   help='Use ema weights if avaiable')
-flags.DEFINE_integer('channels',
-                     default=None,
-                     help = "number of out channels for export")
 flags.DEFINE_integer('sr',
                      default=None,
                      help='Optional resampling sample rate')
@@ -125,6 +124,9 @@ class ScriptedRAVE(nn_tilde.Module):
         self.register_attribute("reset_target", False)
         self.register_attribute("learn_source", False)
         self.register_attribute("reset_source", False)
+        self.register_attribute("temperature", 1.0)
+        receptive_field = getattr(pretrained, "receptive_field", None)
+        self.register_attribute("receptive_field", (int(receptive_field[0]), int(receptive_field[1])))
 
         self.register_buffer("latent_pca", pretrained.latent_pca)
         self.register_buffer("latent_mean", pretrained.latent_mean)
@@ -259,6 +261,7 @@ class ScriptedRAVE(nn_tilde.Module):
     def set_stereo_mode(self, stereo):
         self.stereo_mode = bool(stereo);
 
+
     @torch.jit.export
     def encode(self, x):
         if self.stereo_mode:
@@ -362,6 +365,26 @@ class ScriptedRAVE(nn_tilde.Module):
     def set_reset_source(self, reset_source: bool) -> int:
         self.reset_source = (reset_source, )
         return 0
+    
+    @torch.jit.export
+    def get_temperature(self) -> Tuple[float]:
+        return self.temperature
+
+    @torch.jit.export 
+    def set_temperature(self, temperature: float) -> int:
+        if temperature < 0: 
+            return -1
+        self.temperature = (temperature,)
+        return 0
+
+    @torch.jit.export
+    def get_receptive_field(self) -> Tuple[int, int]:
+        return self.receptive_field
+
+    @torch.jit.export 
+    def set_receptive_field(self, dimred: str) -> int:
+        return -1
+
 
     @torch.jit.export
     def prior(self, temp: torch.Tensor):
@@ -379,14 +402,157 @@ class VariationalScriptedRAVE(ScriptedRAVE):
         super(VariationalScriptedRAVE, self).__init__(*args, **kwargs)
         if self.use_pca:
             assert self.latent_size < self.full_latent_size, "latent_size must be < %d"%(self.full_latent_size)
+        self.register_method(
+            "encode_full",
+            in_channels=self.n_channels,
+            in_ratio=self.encode_params[1],
+            out_channels=self.full_latent_size,
+            out_ratio=self.encode_params[3],
+            input_labels=['(signal) Channel %d'%d for d in range(1, self.n_channels+1)],
+            output_labels=[
+                f'(signal) Latent dimension {i + 1}'
+                for i in range(self.full_latent_size)
+            ],
+        )
+        self.register_method(
+            "decode_full",
+            in_channels=self.full_latent_size,
+            in_ratio=self.decode_params[1],
+            out_channels=self.target_channels,
+            out_ratio=self.decode_params[3],
+            input_labels=[
+                f'(signal) Latent dimension {i+1}'
+                for i in range(self.full_latent_size)
+            ],
+            output_labels=['(signal) Channel %d'%d for d in range(1, self.target_channels+1)]
+        )
+        self.register_method(
+            "encode_dist",
+            in_channels=self.n_channels,
+            in_ratio=self.encode_params[1],
+            out_channels=self.latent_size * 2,
+            out_ratio=self.encode_params[3],
+            input_labels=['(signal) Channel %d'%d for d in range(1, self.n_channels+1)],
+            output_labels=[
+                f'(signal) Latent mean {i + 1}'
+                for i in range(self.latent_size)
+            ] + [
+                f'(signal) Latent std {i + 1}'
+                for i in range(self.latent_size)
+            ],
+        )
+    
+    @torch.jit.export
+    def encode_full(self, x):
+        if self.stereo_mode:
+            if self.n_channels == 1:
+                x = x[:, 0].unsqueeze(0)
+            elif self.n_channels > 2:
+                raise RuntimeError("stereo mode is not available when n_channels > 2")
+
+        if self.is_using_adain:
+            self.update_adain()
+
+        if self.resampler is not None:
+            x = self.resampler.to_model_sampling_rate(x)
+
+        batch_size = x.shape[:-2]
+        if self.input_mode == "pqmf":
+            x = x.reshape(-1, 1, x.shape[-1])
+            x = self.pqmf(x)
+            x = x.reshape(batch_size + (-1, x.shape[-1]))
+        elif self.input_mode == "mel":
+            if self.spectrogram is not None:
+                x = self.spectrogram(x)[..., :-1]
+                x = torch.log1p(x).reshape(batch_size + (-1, x.shape[-1]))
+            else:
+                raise RuntimeError()
+        z = self.encoder(x)
+        z = self.post_process_latent_full(z)
+        return z
+
+    @torch.jit.export
+    def decode_full(self, z, from_forward: bool = False):
+        n_batch = z.shape[0]
+        if self.stereo_mode:
+            n_batch = int(n_batch / 2)
+
+        y = self.decoder(z)
+
+        batch_size = z.shape[:-2]
+        if self.output_mode == "pqmf":
+            y = y.reshape(y.shape[0] * self.n_channels, -1, y.shape[-1])
+            y = self.pqmf.inverse(y)
+            y = y.reshape(batch_size+(self.n_channels, -1))
+
+        if self.resampler is not None:
+            y = self.resampler.from_model_sampling_rate(y)
+
+        # if (output-) padding is scrambled
+        if y.shape[-1] > z.shape[-1] * self.decode_params[1]:
+            y = y[..., :z.shape[-1] * self.decode_params[1]]
+
+        if self.stereo_mode:
+            y = torch.cat([y[:n_batch], y[n_batch:]], 1)
+        elif self.target_channels > self.n_channels:
+            y = torch.cat(y.chunk(self.target_channels, 0), 1)
+        elif self.target_channels < self.n_channels:
+            y = y[:, :self.target_channels]
+        return y
+
+    @torch.jit.export
+    def encode_dist(self, x):
+        if self.stereo_mode:
+            if self.n_channels == 1:
+                x = x[:, 0].unsqueeze(0)
+            elif self.n_channels > 2:
+                raise RuntimeError("stereo mode is not available when n_channels > 2")
+
+        if self.is_using_adain:
+            self.update_adain()
+
+        if self.resampler is not None:
+            x = self.resampler.to_model_sampling_rate(x)
+
+        batch_size = x.shape[:-2]
+        if self.input_mode == "pqmf":
+            x = x.reshape(-1, 1, x.shape[-1])
+            x = self.pqmf(x)
+            x = x.reshape(batch_size + (-1, x.shape[-1]))
+        elif self.input_mode == "mel":
+            if self.spectrogram is not None:
+                x = self.spectrogram(x)[..., :-1]
+                x = torch.log1p(x).reshape(batch_size + (-1, x.shape[-1]))
+            else:
+                raise RuntimeError()
+        z = self.encoder(x)
+
+        # parse mean and scale
+        z, scale = z.chunk(2, 1)
+        std = nn.functional.softplus(scale) + 1e-4
+        z = z - self.latent_mean.unsqueeze(-1)
+        z = F.conv1d(z, self.latent_pca.unsqueeze(-1))
+        z = z[:, :self.latent_size]
+        std = F.conv1d(std*std, self.latent_pca.unsqueeze(-1).pow(2)).sqrt()
+        std = std[:, :self.latent_size]
+        return torch.cat([z, std], dim=-2)
+
+
+    def post_process_latent_full(self, z):
+        z = self.encoder.reparametrize(z, temperature=self.temperature[0])[0]
+        if self.use_pca:
+            z = z - self.latent_mean.unsqueeze(-1)
+            z = F.conv1d(z, self.latent_pca.unsqueeze(-1))
+        return z
 
     def post_process_latent(self, z):
-        z = self.encoder.reparametrize(z)[0]
+        z = self.encoder.reparametrize(z, temperature=self.temperature[0])[0]
         if self.use_pca:
             z = z - self.latent_mean.unsqueeze(-1)
             z = F.conv1d(z, self.latent_pca.unsqueeze(-1))
         z = z[:, :self.latent_size]
         return z
+        
 
     def pre_process_latent(self, z):
         if z.shape[1] < self.full_latent_size:
@@ -395,7 +561,7 @@ class VariationalScriptedRAVE(ScriptedRAVE):
                 self.full_latent_size - z.shape[1],
                 z.shape[-1],
             ).type_as(z)
-            z = torch.cat([z, noise], 1)
+            z = torch.cat([z, noise * self.temperature[0]], 1)
         if self.use_pca:
             z = F.conv1d(z, self.latent_pca.T.unsqueeze(-1))
             z = z + self.latent_mean.unsqueeze(-1)
@@ -547,23 +713,7 @@ def main(argv):
     output = FLAGS.output or os.path.dirname(FLAGS.run)
     model_name = FLAGS.name or FLAGS.run.split(os.sep)[-4]
     
-    pretrained = rave.RAVE(n_channels=FLAGS.channels)
-    if FLAGS.run is not None:
-        logging.info('model found : %s'%FLAGS.run)
-        checkpoint = torch.load(FLAGS.run, map_location='cpu')
-        if FLAGS.ema_weights and "EMA" in checkpoint["callbacks"]:
-            pretrained.load_state_dict(
-                checkpoint["callbacks"]["EMA"],
-                strict=False,
-            )
-        else:
-            pretrained.load_state_dict(
-                checkpoint["state_dict"],
-                strict=False,
-            )
-    else:
-        logging.error("No checkpoint found")
-        exit()
+    pretrained, model_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights)
     pretrained.eval()
 
     class_kwargs = {}
@@ -600,14 +750,15 @@ def main(argv):
         else:
             gin.clear_config()
             logging.info("prior config file : ", prior_config_file)
-            gin.constant('SAMPLE_RATE', pretrained.sr)
-            gin.parse_config_file(prior_config_file)
-            PRIOR = rave.core.search_for_run(FLAGS.prior)
-            logging.info(f"using prior model at {PRIOR}")
-            prior_class = get_prior_class_from_config()
-            prior_pretrained = getattr(prior, prior_class)(pretrained_vae=pretrained, n_channels=pretrained.n_channels, latent_size=FLAGS.latent_size, fidelity=FLAGS.fidelity)
-            prior_pretrained.load_state_dict(get_state_dict(pretrained, PRIOR))
-            prior_scripted = TraceModel(prior_pretrained, pretrained)
+            with ad.GinEnv():
+                gin.constant('SAMPLE_RATE', pretrained.sr)
+                gin.parse_config_file(prior_config_file)
+                PRIOR = rave.core.search_for_run(FLAGS.prior)
+                logging.info(f"using prior model at {PRIOR}")
+                prior_class = get_prior_class_from_config()
+                prior_pretrained = getattr(prior, prior_class)(pretrained_vae=pretrained, n_channels=pretrained.n_channels, latent_size=FLAGS.latent_size, fidelity=FLAGS.fidelity)
+                prior_pretrained.load_state_dict(get_state_dict(pretrained, PRIOR), strict=False)
+                prior_scripted = TraceModel(prior_pretrained, pretrained)
 
 
     for m in pretrained.modules():
@@ -617,7 +768,7 @@ def main(argv):
     logging.info("script model")
     scripted_rave = script_class(
         pretrained=pretrained,
-        channels = FLAGS.channels,
+        channels = pretrained.n_channels,
         fidelity=FLAGS.fidelity,
         target_sr=FLAGS.sr,
         prior = prior_scripted,

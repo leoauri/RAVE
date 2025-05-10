@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 import rave
-from scripts import export
+from rave.scripts import export
 
 gin.enter_interactive_mode()
 
@@ -91,7 +91,7 @@ def test_config(config, sr, stereo):
     scripted_rave = script_class(
         pretrained=model,
         stereo=stereo,
-    tests/test_configs.py)
+    )
 
     scripted_rave_resampled = script_class(
         pretrained=model,

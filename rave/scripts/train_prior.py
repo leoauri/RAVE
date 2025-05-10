@@ -26,14 +26,13 @@ flags.DEFINE_string('model', default=None, required=True, help="pretrained RAVE 
 flags.DEFINE_multi_string('config', default="prior/prior_v1.gin", help="config path")
 flags.DEFINE_string('db_path', default=None, required=True, help="Preprocessed dataset path")
 flags.DEFINE_string('out_path', default="runs/", help="out directory path")
-flags.DEFINE_multi_integer('gpu', default=None, help='GPU to use')
+flags.DEFINE_multi_string('device', default="auto", help="training device (default: auto. Can be cuda, cuda:0, ..., mps, etc.)")
 flags.DEFINE_integer('batch', 8, help="batch size")
 flags.DEFINE_integer('n_signal', 0, help="chunk size (default: given by prior config)")
 flags.DEFINE_string('ckpt', default=None, help="checkpoint to resume")
-flags.DEFINE_integer('channels', default=None, help="audio channels")
 flags.DEFINE_float('fidelity', default=0.99, help="prior target fidelity")
 flags.DEFINE_integer('workers',
-                     default=8,
+                     default=None,
                      help='Number of workers to spawn for dataset loading')
 flags.DEFINE_integer('val_every', 10000, help='Checkpoint model every n steps')
 flags.DEFINE_integer('save_every',
@@ -67,29 +66,8 @@ def add_gin_extension(config_name: str) -> str:
 def main(argv):
 
     # load pretrained RAVE
-    config_file = rave.core.search_for_config(FLAGS.model) 
-    if config_file is None:
-        print('no configuration file found at address :'%FLAGS.model)
-    gin.parse_config_file(config_file)
-    run = rave.core.search_for_run(FLAGS.model)
-    if run is None:
-        print('no checkpoint found in %s'%FLAGS.model)
-        exit()
-    n_channels = FLAGS.channels or 1
-    pretrained = rave.RAVE(n_channels=n_channels)
-    print('model found : %s'%run)
-    checkpoint = torch.load(run, map_location='cpu')
-    if "EMA" in checkpoint["callbacks"]:
-        pretrained.load_state_dict(
-            checkpoint["callbacks"]["EMA"],
-            strict=False,
-        )
-    else:
-        pretrained.load_state_dict(
-            checkpoint["state_dict"],
-            strict=False,
-        )
-    pretrained.eval()
+    pretrained, run_path = rave.load_rave_checkpoint(FLAGS.model)
+    n_channels = getattr(pretrained, "n_channels", 1)
     gin.clear_config()
     
     # parse configuration
@@ -108,6 +86,8 @@ def main(argv):
     # create model
     if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):
         prior = rave.prior.VariationalPrior(pretrained_vae=pretrained, fidelity=FLAGS.fidelity, n_channels=n_channels)
+    elif isinstance(pretrained.encoder, rave.blocks.WasserteinEncoder):
+        prior = rave.prior.WasserteinEncoder(pretrained_vae=pretrained, fidelity=FLAGS.fidelity, n_channels=n_channels)
     else:
         raise NotImplementedError("prior not implemented for encoder of type %s"%(type(pretrained.encoder)))
 
@@ -119,12 +99,10 @@ def main(argv):
                                        rand_pitch=FLAGS.rand_pitch,
                                        n_channels=pretrained.n_channels)
 
-    train, val = rave.dataset.split_dataset(dataset, 98)
+    train, val = rave.dataset.split_dataset(dataset, percent=98, training_name=rave.get_run_name(run_path))
 
     # get data-loader
-    num_workers = FLAGS.workers
-    if os.name == "nt" or sys.platform == "darwin":
-        num_workers = 0
+    num_workers = rave.core.get_workers(FLAGS.workers)
     train = DataLoader(train,
                        FLAGS.batch,
                        True,
@@ -152,30 +130,12 @@ def main(argv):
     gin_hash = hashlib.md5(
         gin.operative_config_str().encode()).hexdigest()[:10]
 
+    
+
     RUN_NAME = f'{FLAGS.name}_{gin_hash}'
     os.makedirs(os.path.join(FLAGS.out_path, RUN_NAME), exist_ok=True)
 
-    if FLAGS.gpu == [-1]:
-        gpu = 0
-    else:
-        gpu = FLAGS.gpu or rave.core.setup_gpu()
-
-    print('selected gpu:', gpu)
-
-    accelerator = None
-    devices = None
-    if FLAGS.gpu == [-1]:
-        pass
-    elif torch.cuda.is_available():
-        accelerator = "cuda"
-        devices = FLAGS.gpu or rave.core.setup_gpu()
-    elif torch.backends.mps.is_available():
-        print(
-            "Training on mac is not available yet. Use --gpu -1 to train on CPU (not recommended)."
-        )
-        exit()
-        accelerator = "mps"
-        devices = 1
+    accelerator, devices = rave.core.get_training_device(FLAGS.device, allow_multi=True)
 
     callbacks = [
         validation_checkpoint,

@@ -31,16 +31,9 @@ flags.DEFINE_multi_string('exclude', [], help="wildcard to exclude target files"
 flags.DEFINE_multi_string('meta_regexp', [], help="additional regexp for metadata parsing")
 flags.DEFINE_multi_string('feature', [], help="additional feature files (see acids-dataset)")
 
-flags.DEFINE_bool('lazy',
-                  default=False,
-                  help='Decode and resample audio samples.')
-flags.DEFINE_bool('dyndb',
-                  default=True,
-                  help="Allow the database to grow dynamically")
+
 
 def main(args):
-    if FLAGS.lazy:
-        raise NotImplementedError('--lazy mode is not available yet.')
     acids_dataset.preprocess_dataset(
         FLAGS.input_path, 
         FLAGS.output_path, 
@@ -53,8 +46,7 @@ def main(args):
         exclude = FLAGS.exclude, 
         meta_regexp = FLAGS.meta_regexp, 
         max_db_size = FLAGS.max_db_size, 
-        dyndb = FLAGS.dyndb, 
-        waveform = not FLAGS.lazy
+        waveform = True,
     )
 
 if __name__ == '__main__':

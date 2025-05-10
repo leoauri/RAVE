@@ -4,6 +4,7 @@ import cached_conv as cc
 import gin
 import torch
 import acids_dataset
+from acids_dataset.utils import GinEnv
 
 
 BASE_PATH: Path = Path(__file__).parent
@@ -38,3 +39,40 @@ from .discriminator import *
 from .model import RAVE, BetaWarmupCallback
 from .pqmf import *
 from .balancer import *
+from . import core
+
+
+def get_run_name(run_path): 
+    checkpoint_path = (Path(run_path) / "..").resolve()
+    if checkpoint_path.stem != "checkpoints": 
+        return None
+    version_path = (checkpoint_path / "..").resolve()
+    if checkpoint_path.stem.startswith("version_"):
+        return None
+    return ((version_path / "..").resolve()).stem
+
+def load_rave_checkpoint(model_path, n_channels=1, ema=False, name="last.ckpt"):
+    model_path = Path(model_path)
+    if not model_path.exists():
+        raise FileNotFoundError(str(model_path))
+    if model_path.suffix == ".ts":
+        return torch.jit.load(model_path)
+    with GinEnv():
+        config_file = core.search_for_config(model_path) 
+        if config_file is None:
+            print('no configuration file found at address :'%model_path)
+        gin.parse_config_file(config_file)
+        run_path = core.search_for_run(model_path, name=name)
+        rave_model = RAVE()
+        checkpoint = torch.load(run_path, map_location='cpu')
+        if ema and "EMA" in checkpoint["callbacks"]:
+            rave_model.load_state_dict(
+                checkpoint["callbacks"]["EMA"],
+                strict=False,
+            )
+        else:
+            rave_model.load_state_dict(
+                checkpoint["state_dict"],
+                strict=False,
+            )
+    return rave_model, run_path

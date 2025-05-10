@@ -20,6 +20,8 @@ except:
     import rave
 
 import acids_dataset as ad
+ad.fragments.base.FORCE_ARRAY_RESHAPE = False
+
 import rave
 import rave.core
 import rave.dataset
@@ -49,6 +51,9 @@ flags.DEFINE_integer('val_every', 10000, help='Checkpoint model every n steps')
 flags.DEFINE_integer('save_every',
                      500000,
                      help='save every n steps (default: just last)')
+flags.DEFINE_multi_string('seed',
+                           default = 0,
+                           help = 'augmentation configurations to use')                    
 flags.DEFINE_integer('n_signal',
                      131072,
                      help='Number of audio samples to use during training')
@@ -59,9 +64,9 @@ flags.DEFINE_string('ckpt',
                     help='Path to previous checkpoint of the run')
 flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
 flags.DEFINE_integer('workers',
-                     default=8,
+                     default=None,
                      help='Number of workers to spawn for dataset loading')
-flags.DEFINE_multi_integer('gpu', default=None, help='GPU to use')
+flags.DEFINE_multi_string('device', default="auto", help="training device (default: auto. Can be cuda, cuda:0, ..., mps, etc.)")
 flags.DEFINE_bool('derivative',
                   default=False,
                   help='Train RAVE on the derivative of the signal')
@@ -82,6 +87,7 @@ flags.DEFINE_bool('smoke_test',
                   help="Run training with n_batches=1 to test the model")
 flags.DEFINE_bool('allow_partial_resume', default=False, help="allow partial resuming of a checkpoint")
 
+torch.manual_seed(FLAGS.seed)
 
 class EMA(pl.Callback):
 
@@ -158,9 +164,13 @@ def main(argv):
             FLAGS.override,
         )
 
+    gin_hash = hashlib.md5(
+        gin.operative_config_str().encode()).hexdigest()[:10]
+    RUN_NAME = f'{FLAGS.name}_{gin_hash}'
 
     # create model
     model = rave.RAVE(n_channels=n_channels)
+
     if FLAGS.derivative:
         #TODO replace with transform
         model.integrator = rave.dataset.get_derivator_integrator(model.sr)[1]
@@ -181,12 +191,9 @@ def main(argv):
                                        augmentations=augmentations,
                                        n_channels=n_channels)
 
-    train, val = rave.dataset.split_dataset(dataset, percent=98)
+    train, val = rave.dataset.split_dataset(dataset, percent=98, training_name=RUN_NAME)
 
-    # get data-loader
-    num_workers = FLAGS.workers
-    if os.name == "nt" or sys.platform == "darwin":
-        num_workers = 0
+    num_workers = rave.core.get_workers(FLAGS.workers)
     train = DataLoader(train,
                        FLAGS.batch,
                        True,
@@ -211,37 +218,10 @@ def main(argv):
         val_check['limit_train_batches'] = 1
         val_check['limit_val_batches'] = 1
 
-    gin_hash = hashlib.md5(
-        gin.operative_config_str().encode()).hexdigest()[:10]
-
-    RUN_NAME = f'{FLAGS.name}_{gin_hash}'
-
     os.makedirs(os.path.join(FLAGS.out_path, RUN_NAME), exist_ok=True)
 
-    if FLAGS.gpu == [-1]:
-        gpu = 0
-    else:
-        gpu = FLAGS.gpu or rave.core.setup_gpu()
-
-    print('selected gpu:', gpu)
-
-    #TODO better handling
-    accelerator = None
-    devices = None
-    if FLAGS.gpu == [-1]:
-        accelerator = "cpu"
-        devices = 1
-    elif torch.cuda.is_available():
-        accelerator = "cuda"
-        devices = FLAGS.gpu or rave.core.setup_gpu()
-    elif torch.backends.mps.is_available():
-        accelerator = "mps"
-        devices = 1
-    else:
-        accelerator = "cpu"
-        devices = 1
-        
-
+    accelerator, devices = rave.core.get_training_device(FLAGS.device, allow_multi=True)
+    
     callbacks = [
         validation_checkpoint,
         last_checkpoint,
@@ -252,6 +232,15 @@ def main(argv):
 
     if FLAGS.ema is not None:
         callbacks.append(EMA(FLAGS.ema))
+
+    run = None
+    if FLAGS.ckpt:
+        run = rave.core.search_for_run(FLAGS.ckpt)
+        if run is None: 
+            run = rave.core.search_for_run(FLAGS.ckpt, None)
+            if run is None:
+                logging.error('could not find model with ckpt=%s. Maybe provide a more detailed path: %s'%FLAGS.ckpt)
+                exit()
 
     trainer = pl.Trainer(
         logger=pl.loggers.TensorBoardLogger(
@@ -269,7 +258,6 @@ def main(argv):
         **val_check,
     )
 
-    run = rave.core.search_for_run(FLAGS.ckpt)
 
     with open(os.path.join(FLAGS.out_path, RUN_NAME, "config.gin"), "w") as config_out:
         config_out.write(gin.operative_config_str())

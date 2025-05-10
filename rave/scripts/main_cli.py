@@ -3,7 +3,7 @@ import sys
 from absl import app
 
 AVAILABLE_SCRIPTS = [
-    'preprocess', 'train', 'train_prior', 'export', 'export_onnx', 'remote_dataset', 'generate'
+    'preprocess', 'train', 'train_prior', 'train_after', 'export', 'export_onnx', 'remote_dataset', 'generate'
 ]
 
 
@@ -32,6 +32,10 @@ def main():
         from rave.scripts import train_prior
         sys.argv[0] = train_prior.__name__
         app.run(train_prior.main)
+    elif command == 'train_after':
+        from rave.scripts import train_after
+        sys.argv[0] = train_after.__name__
+        app.run(train_after.main)
     elif command == 'export':
         from rave.scripts import export
         sys.argv[0] = export.__name__
