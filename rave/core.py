@@ -1,4 +1,5 @@
 import json
+import re
 from typing import List
 import os
 from pathlib import Path
@@ -635,3 +636,63 @@ def get_workers(workers):
             num_workers = workers
     return num_workers
     
+
+# transfer / fine-tune related callbacks
+
+def parse_weight_shortcut(weight_pattern: str):
+    if weight_pattern == "all":
+        return r".*"
+    elif weight_pattern == "encoder":
+        return r"^encoder\..*"
+    elif weight_pattern == "decoder":
+        return r"^decoder\..*"
+    elif weight_pattern == "discriminator":
+        return r"^discriminator\..*"
+    else:
+        return weight_pattern
+
+def parse_dict_with_regexps(state_dict, patterns):
+    filtered_weights = {}
+    if not isinstance(patterns, list):
+        patterns = [patterns]
+    for p in patterns:
+        for k, v in state_dict.items():
+            if re.match(p, k):
+                filtered_weights[k] = v
+    return filtered_weights
+
+
+def get_weights_from_pattern(pattern: str):
+    parts = pattern.split('->')
+    model_path = search_for_run(parts[0])
+    if model_path is None: 
+        model_path = search_for_run(parts[0], None)
+    if model_path is None:
+        raise FileNotFoundError("no model found at : %s"%model_path)
+
+    if len(parts) == 1:
+        weights = ["all"]
+    elif len(parts) == 2:
+        weights = parts[1].split(',')
+    else:
+        raise ValueError('Cannot parse pattern : %s'%pattern)
+    weights = list(map(parse_weight_shortcut, weights))
+
+    state_dict = dict(torch.load(model_path)['state_dict'])
+    filtered_dict = parse_dict_with_regexps(state_dict, weights)
+    if len(filtered_dict) == 0:
+        raise KeyError("no weights found for patterns : %s"%weights)
+    return filtered_dict
+
+def get_finetune_keys(model, train=[], freeze=[]):
+    state_dict = model.state_dict()
+    weights_to_train = set()
+    for t in train:
+        t = parse_weight_shortcut(t)
+        f_dict = parse_dict_with_regexps(state_dict, t)
+        weights_to_train = weights_to_train.union(set(f_dict.keys()))
+    for f in freeze: 
+        f = parse_weight_shortcut(f)
+        keys_to_remove = list(filter(lambda x: re.match(f, x) is not None, weights_to_train))
+        weights_to_train.difference_update(keys_to_remove)
+    return list(sorted(weights_to_train))

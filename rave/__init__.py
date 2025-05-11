@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 
 import cached_conv as cc
 import gin
@@ -48,6 +49,7 @@ RAVE_OVERRIDE_CONFIGS = [
     "full_beta.gin"
 ]
 
+
 def get_run_name(run_path): 
     checkpoint_path = (Path(run_path) / "..").resolve()
     if checkpoint_path.stem != "checkpoints": 
@@ -57,7 +59,7 @@ def get_run_name(run_path):
         return None
     return ((version_path / "..").resolve()).stem
 
-def load_rave_checkpoint(model_path, n_channels=1, ema=False, name="last.ckpt"):
+def load_rave_checkpoint(model_path, n_channels=1, ema=False, name="last.ckpt", remove_keys=None):
     model_path = Path(model_path)
     if not model_path.exists():
         raise FileNotFoundError(str(model_path))
@@ -73,6 +75,14 @@ def load_rave_checkpoint(model_path, n_channels=1, ema=False, name="last.ckpt"):
             raise FileNotFoundError("no model found with name: %s"%name)
         rave_model = RAVE()
         checkpoint = torch.load(run_path, map_location='cpu')
+        if remove_keys is not None: 
+            if not isinstance(remove_keys, list): remove_keys = [remove_keys]
+            weights_to_remove = []
+            for k in checkpoint['state_dict']: 
+                if set([re.match(f, k) for f in remove_keys]) != {None}: 
+                    weights_to_remove.append(k)
+            for w in weights_to_remove: 
+                del checkpoint['state_dict'][w]
         if ema and "EMA" in checkpoint["callbacks"]:
             rave_model.load_state_dict(
                 checkpoint["callbacks"]["EMA"],

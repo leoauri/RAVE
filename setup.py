@@ -15,8 +15,8 @@ with open("requirements.txt", "r") as requirements:
 setuptools.setup(
     name="acids-rave",
     version=__version__,  # type: ignore
-    author="Antoine CAILLON",
-    author_email="caillon@ircam.fr",
+    author="Antoine Caillon & Axel Chemla--Romeu-Santos",
+    author_email="chemla@ircam.fr",
     description="RAVE: a Realtime Audio Variatione autoEncoder",
     long_description=readme,
     long_description_content_type="text/markdown",
@@ -33,6 +33,6 @@ setuptools.setup(
         "rave = rave.scripts.main_cli:main",
     ]},
     install_requires=requirements.split("\n"),
-    python_requires='>=3.9',
+    python_requires='>=3.11',
     include_package_data=True,
 )

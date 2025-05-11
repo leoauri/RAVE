@@ -1,4 +1,5 @@
 import math
+from absl import logging
 import os
 from time import time
 from typing import Callable, Optional, Iterable, Dict
@@ -231,17 +232,68 @@ class RAVE(pl.LightningModule):
         self.register_buffer("receptive_field", torch.tensor([0, 0]).long())
         self.audio_monitor_epochs = audio_monitor_epochs
 
-    def configure_optimizers(self):
-        gen_p = list(self.encoder.parameters())
-        gen_p += list(self.decoder.parameters())
-        dis_p = list(self.discriminator.parameters())
+    @gin.configurable(module="rave")
+    def configure_optimizers(self, weight_list = None):
+        if weight_list is None:
+            gen_p = list(self.encoder.parameters())
+            gen_p += list(self.decoder.parameters())
+            dis_p = list(self.discriminator.parameters())
+            gen_opt = torch.optim.Adam(gen_p, 1e-3, (.5, .9))
+            dis_opt = torch.optim.Adam(dis_p, 1e-4, (.5, .9))
+            return ({'optimizer': gen_opt,
+                    'lr_scheduler': {'scheduler': torch.optim.lr_scheduler.LinearLR(gen_opt, start_factor=1.0, end_factor=0.1, total_iters=self.warmup)}},
+                    {'optimizer':dis_opt})
+
+        else: 
+            params = dict(self.named_parameters())
+            weight_names = list(filter(lambda x: x in params, weight_list))
+            gen_p = list(map(lambda x: self.get_parameter(x), filter(lambda x: not x.startswith('discriminator'), weight_names)))
+            dis_p = list(map(lambda x: self.get_parameter(x), filter(lambda x: x.startswith('discriminator'), weight_names)))
+            optimizers = []
+            if len(gen_p) > 0: 
+                gen_opt = torch.optim.Adam(gen_p, 1e-3, (.5, .9))
+                optimizers.append({'optimizer': gen_opt})
+            if len(dis_p) > 0:
+                dis_opt = torch.optim.Adam(gen_p, 1e-4, (.5, .9))
+                optimizers.append({'optimizer': dis_opt})
+
 
         gen_opt = torch.optim.Adam(gen_p, 1e-3, (.5, .9))
         dis_opt = torch.optim.Adam(dis_p, 1e-4, (.5, .9))
-
         return ({'optimizer': gen_opt,
                  'lr_scheduler': {'scheduler': torch.optim.lr_scheduler.LinearLR(gen_opt, start_factor=1.0, end_factor=0.1, total_iters=self.warmup)}},
                 {'optimizer':dis_opt})
+
+    def import_weights(self, weight_dict, strict=False):
+        state_dict = self.state_dict()
+        invalid_keys = []
+        valid_keys = []
+        for k, v in weight_dict.items(): 
+            assert k in state_dict, "cannot update weight %s k: does not exist in model"%k
+            if strict:
+                if v.shape != state_dict[k].shape:
+                    invalid_keys.append(k)
+                    continue
+            valid_keys.append(k)
+
+        if len(invalid_keys) > 0:
+            error_description = "\n\t".join(["imported shape: %s, model shape: %s"%(weight_dict[i].shape, state_dict[i].shape) for i in invalid_keys])
+            error_description = 'Cannot import keys, size mismatch : \n%s'%error_description
+            if strict:
+                raise RuntimeError(error_description)
+            else:
+                logging.warning(error_description)
+
+        for k in valid_keys:
+            try: 
+                self.get_parameter(k).data = v
+            except AttributeError: 
+                try:
+                    self.get_buffer(k).data = v
+                except Exception as e:
+                    raise e
+                    
+        
 
     def _mel_encode(self, x: torch.Tensor):
         batch_size = x.shape[:-2]

@@ -31,12 +31,7 @@ from rave.dataset import get_augmentations, parse_transform
 FLAGS = flags.FLAGS
 
 flags.DEFINE_string('name', None, help='Name of the run', required=True)
-flags.DEFINE_multi_string('config',
-                          default='v2.gin',
-                          help='RAVE configuration to use')
-flags.DEFINE_multi_string('augment',
-                           default = [],
-                            help = 'augmentation configurations to use')
+flags.DEFINE_string('run', None, help='Path of model to fine-tune', required=True)
 flags.DEFINE_string('db_path',
                     None,
                     help='Preprocessed dataset path',
@@ -44,6 +39,15 @@ flags.DEFINE_string('db_path',
 flags.DEFINE_string('out_path',
                     default="runs/",
                     help='Output folder')
+flags.DEFINE_multi_string('augment',
+                           default = [],
+                            help = 'augmentation configurations to use')
+flags.DEFINE_multi_string('train',
+                           default = ["all"],
+                           help = 'specify weights to train')
+flags.DEFINE_multi_string('freeze',
+                           default = [],
+                           help = 'specify weights to freeze')                           
 flags.DEFINE_integer('max_steps',
                      6000000,
                      help='Maximum number of training steps')
@@ -52,20 +56,15 @@ flags.DEFINE_integer('save_every',
                      500000,
                      help='save every n steps (default: just last)')
 flags.DEFINE_integer('seed',
-                           default = 0,
-                           help = 'augmentation configurations to use')                    
+                      default = 0,
+                      help = 'augmentation configurations to use')                    
 flags.DEFINE_integer('n_signal',
                      131072,
                      help='Number of audio samples to use during training')
-flags.DEFINE_integer('channels', 0, help="number of audio channels")
 flags.DEFINE_integer('batch', 8, help='Batch size')
 flags.DEFINE_string('ckpt',
                     None,
                     help='Path to previous checkpoint of the run')
-flags.DEFINE_multi_string('transfer', 
-                          None, 
-                          help="Transfer keys from an existing model. Must be of format path_to_ckpt=>pattern1,pattern2 ; see README.md for more explanation")
-flags.DEFINE_bool('strict_transfer', default=True, help = "allows uncomplete transfer if keys are not found (default: None)")                        
 flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
 flags.DEFINE_integer('workers',
                      default=None,
@@ -80,94 +79,47 @@ flags.DEFINE_bool('normalize',
 flags.DEFINE_list('rand_pitch',
                   default=None,
                   help='activates random pitch')
-flags.DEFINE_float('ema',
-                   default=None,
-                   help='Exponential weight averaging factor (optional)')
+flags.DEFINE_bool('ema_weights',
+                  default=False,
+                  help='Use ema weights if avaiable')
 flags.DEFINE_bool('progress',
                   default=True,
                   help='Display training progress bar')
+flags.DEFINE_bool('reset_discriminator', default=False, help="resets discriminator")
 flags.DEFINE_bool('smoke_test', 
                   default=False,
                   help="Run training with n_batches=1 to test the model")
 flags.DEFINE_bool('allow_partial_resume', default=False, help="allow partial resuming of a checkpoint")
 
 
-class EMA(pl.Callback):
+def add_gin_extension(config_name: str) -> str:
+    if config_name[-4:] != '.gin':
+        config_name += '.gin'
+    return config_name
 
-    def __init__(self, factor=.999) -> None:
-        super().__init__()
-        self.weights = {}
-        self.factor = factor
-
-    def on_train_batch_end(self, trainer, pl_module, outputs, batch,
-                           batch_idx) -> None:
-        for n, p in pl_module.named_parameters():
-            if n not in self.weights:
-                self.weights[n] = p.data.clone()
-                continue
-
-            self.weights[n] = self.weights[n] * self.factor + p.data * (
-                1 - self.factor)
-
-    def swap_weights(self, module):
-        for n, p in module.named_parameters():
-            current = p.data.clone()
-            p.data.copy_(self.weights[n])
-            self.weights[n] = current
-
-    def on_validation_epoch_start(self, trainer, pl_module) -> None:
-        if self.weights:
-            self.swap_weights(pl_module)
-        else:
-            print("no ema weights available")
-
-    def on_validation_epoch_end(self, trainer, pl_module) -> None:
-        if self.weights:
-            self.swap_weights(pl_module)
-        else:
-            print("no ema weights available")
-
-    def state_dict(self) -> Dict[str, Any]:
-        return self.weights.copy()
-
-    def load_state_dict(self, state_dict: Dict[str, Any]) -> None:
-        self.weights.update(state_dict)
+def parse_augmentations(augmentations, sr):
+    for a in augmentations:
+        with ad.GinEnv(paths=[Path(rave.__file__).parent / "configs" / "augmentations"]):
+            gin.parse_config_file(a)
+            parse_transform()
+            gin.clear_config()
+    return get_augmentations()
 
 def main(argv):
     torch.set_float32_matmul_precision('high')
     torch.manual_seed(FLAGS.seed)
     torch.backends.cudnn.benchmark = True
 
-    # check dataset channels
-    n_channels = rave.dataset.get_training_channels(FLAGS.db_path, FLAGS.channels)
-    FLAGS.override.append('RAVE.n_channels=%d'%n_channels)
-    
     # parse configuration
-    if FLAGS.ckpt:
-        config_file = rave.core.search_for_config(FLAGS.ckpt)
-        if config_file is None:
-            logging.error('Config file not found in %s'%FLAGS.run)
-            exit()
-        FLAGS.config = list(filter(lambda x: x in rave.RAVE_OVERRIDE_CONFIGS, map(rave.add_gin_extension, FLAGS.config)))
-        gin.parse_config_files_and_bindings([config_file] + FLAGS.config, FLAGS.override)
+    if FLAGS.reset_discriminator: 
+        remove_keys = ["discriminator.*"]
     else:
-        gin.parse_config_files_and_bindings(
-            map(rave.add_gin_extension, FLAGS.config),
-            FLAGS.override,
-        )
-
-    gin_hash = hashlib.md5(
-        gin.operative_config_str().encode()).hexdigest()[:10]
-    RUN_NAME = f'{FLAGS.name}_{gin_hash}'
-
-    # create model
-    model = rave.RAVE(n_channels=n_channels)
-
-    # transfer keys if needed
-    if len(FLAGS.transfer) > 0: 
-        for pattern in FLAGS.transfer:
-            weight_dict = rave.core.get_weights_from_pattern(pattern)
-            model.import_weights(weight_dict, strict=FLAGS.strict_transfer)
+        remove_keys = None
+    try:
+        model, run_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights, remove_keys=remove_keys)
+    except FileNotFoundError:
+        model, run_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights, name=None, remove_keys=remove_keys)
+    RUN_NAME = rave.get_run_name(run_path)
 
     if FLAGS.derivative:
         #TODO replace with transform
@@ -176,8 +128,15 @@ def main(argv):
     
     # parse augmentations
     with gin.unlock_config():
-        augmentations = rave.parse_augmentations(map(rave.add_gin_extension, FLAGS.augment), sr=model.sr)
+        augmentations = parse_augmentations(map(add_gin_extension, FLAGS.augment), sr=model.sr)
         gin.bind_parameter('dataset.get_dataset.augmentations', augmentations)
+
+    # parse keys to train / freeze 
+    training_keys = rave.core.get_finetune_keys(model, FLAGS.train, FLAGS.freeze)
+    if len(training_keys) == 0:
+        logging.error('No training keys found with train=%s, freeze=%s'%(FLAGS.train, FLAGS.freeze))
+    logging.info("Number of parameters fine-tuned : %d"%len(training_keys))
+    gin.bind_parameter("rave.configure_optimizers.weight_list", training_keys)
 
     # parse datasset
     dataset = rave.dataset.get_dataset(FLAGS.db_path,
@@ -187,7 +146,7 @@ def main(argv):
                                        normalize=FLAGS.normalize,
                                        rand_pitch=FLAGS.rand_pitch,
                                        augmentations=augmentations,
-                                       n_channels=n_channels)
+                                       n_channels=model.n_channels)
 
     train, val = rave.dataset.split_dataset(dataset, percent=98, training_name=RUN_NAME)
 
@@ -198,6 +157,7 @@ def main(argv):
                        drop_last=True,
                        num_workers=num_workers)
     val = DataLoader(val, FLAGS.batch, False, num_workers=num_workers)
+
 
     # CHECKPOINT CALLBACKS
     validation_checkpoint = pl.callbacks.ModelCheckpoint(monitor="validation",
@@ -227,9 +187,6 @@ def main(argv):
         rave.model.QuantizeCallback(),
         rave.model.BetaWarmupCallback(),
     ]
-
-    if FLAGS.ema is not None:
-        callbacks.append(EMA(FLAGS.ema))
 
     run = None
     if FLAGS.ckpt:
