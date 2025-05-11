@@ -144,7 +144,7 @@ def main(argv):
         if config_file is None:
             logging.error('Config file not found in %s'%FLAGS.run)
             exit()
-        FLAGS.config = list(filter(lambda x: x in rave.RAVE_OVERRIDE_CONFIGS, map(add_gin_extension, FLAGS.config)))
+        FLAGS.config = list(filter(lambda x: x in rave.RAVE_OVERRIDE_CONFIGS, map(rave.add_gin_extension, FLAGS.config)))
         gin.parse_config_files_and_bindings([config_file] + FLAGS.config, FLAGS.override)
     else:
         gin.parse_config_files_and_bindings(
