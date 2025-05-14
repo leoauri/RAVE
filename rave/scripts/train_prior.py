@@ -30,7 +30,8 @@ flags.DEFINE_multi_string('device', default="auto", help="training device (defau
 flags.DEFINE_integer('batch', 8, help="batch size")
 flags.DEFINE_integer('n_signal', 0, help="chunk size (default: given by prior config)")
 flags.DEFINE_string('ckpt', default=None, help="checkpoint to resume")
-flags.DEFINE_float('fidelity', default=0.99, help="prior target fidelity")
+flags.DEFINE_float('fidelity', default=0.99, help="prior target fidelity (exclusive with fidelity)")
+flags.DEFINE_integer('latent_size', default=None, help="enforces learned latent size (exclusive with fidelity)")
 flags.DEFINE_integer('workers',
                      default=None,
                      help='Number of workers to spawn for dataset loading')
@@ -87,9 +88,9 @@ def main(argv):
 
     # create model
     if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):
-        prior = rave.prior.VariationalPrior(pretrained_vae=pretrained, fidelity=FLAGS.fidelity, n_channels=n_channels)
+        prior = rave.prior.VariationalPrior(pretrained_vae=pretrained, fidelity=FLAGS.fidelity, latent_size=FLAGS.latent_size, n_channels=n_channels)
     elif isinstance(pretrained.encoder, rave.blocks.WasserteinEncoder):
-        prior = rave.prior.WasserteinEncoder(pretrained_vae=pretrained, fidelity=FLAGS.fidelity, n_channels=n_channels)
+        prior = rave.prior.WasserteinEncoder(pretrained_vae=pretrained, fidelity=FLAGS.fidelity, latent_size=FLAGS.latent_size, n_channels=n_channels)
     else:
         raise NotImplementedError("prior not implemented for encoder of type %s"%(type(pretrained.encoder)))
 

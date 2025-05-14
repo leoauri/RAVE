@@ -7,7 +7,7 @@ GPUtil>=1.4.0
 tqdm>=4.64.1
 sox
 
-numpy==2.2.5
+numpy==2.1
 scipy==1.15.2
 librosa>=0.9.2
 scikit_learn>=1.1.2
@@ -18,7 +18,7 @@ tensorboard
 pytorch_lightning
 torch_ema
 einops>=0.5.0
-einops_exts>0.0.4
+einops_exts>=0.0.4
 
 nn-tilde>=1.5.2
 cached-conv>=2.5.0

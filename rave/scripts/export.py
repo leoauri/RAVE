@@ -66,7 +66,7 @@ flags.DEFINE_bool(
 flags.DEFINE_string('name', 
                      default= None,
                      help = "custom name for the scripted model (default: run name)")
-flags.DEFINE_string('output', 
+flags.DEFINE_string('out_path', 
                      default= None,
                      help = "output location of scripted model")
 flags.DEFINE_bool('ema_weights',
@@ -653,7 +653,8 @@ class TraceModel(nn.Module):
         x = self.pretrained.forward(self.previous_step)
         x = x / temp
         x = self.pretrained.post_process_prediction(x, argmax=False)
-        self.previous_step.copy_(x.clone())
+        # self.previous_step.copy_(x.clone())
+        # self.previous_step = x.clone()
 
         # DECODE AND SHIFT PREDICTION
         x = self.pretrained.quantized_normal.decode(x)
@@ -715,10 +716,9 @@ def main(argv):
     except: 
         pretrained, model_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights, name=None)
     pretrained.eval()
-    output = FLAGS.output or os.path.dirname(FLAGS.run)
-    model_name = FLAGS.name or FLAGS.run.split(os.sep)[-4]
+    output = FLAGS.out_path or os.path.dirname(FLAGS.run)
+    model_name = FLAGS.name or rave.get_run_name(model_path)
     
-
     class_kwargs = {}
     if isinstance(pretrained.encoder, rave.blocks.VariationalEncoder):
         script_class = VariationalScriptedRAVE
@@ -745,7 +745,9 @@ def main(argv):
 
     # parse prior
     prior_scripted=None
+    prior_expected = False
     if FLAGS.prior is not None:
+        prior_expected = True
         logging.info("loading prior from checkpoint")
         prior_config_file = rave.core.search_for_config(FLAGS.prior)
         if prior_config_file is None:
@@ -760,14 +762,20 @@ def main(argv):
                 logging.info(f"using prior model at {PRIOR}")
                 prior_class = get_prior_class_from_config()
                 prior_pretrained = getattr(prior, prior_class)(pretrained_vae=pretrained, n_channels=pretrained.n_channels, latent_size=FLAGS.latent_size, fidelity=FLAGS.fidelity)
-                prior_pretrained.load_state_dict(get_state_dict(pretrained, PRIOR), strict=False)
-                prior_scripted = TraceModel(prior_pretrained, pretrained)
-
+                prior_state_dict = get_state_dict(prior_pretrained, PRIOR)
+                try:
+                    prior_pretrained.load_state_dict(prior_state_dict, strict=False)
+                    prior_scripted = TraceModel(prior_pretrained, pretrained)
+                except RuntimeError:
+                    logging.error("""could not load prior from %s with fidelity=%f and latent_size=%s.\n"""%(PRIOR, FLAGS.fidelity, FLAGS.latent_size) \
+                                  + """did you put for export the same fidelity / latent parameters as for training?""")
 
     for m in pretrained.modules():
         if hasattr(m, "weight_g"):
             nn.utils.remove_weight_norm(m)
 
+
+    # cc.MAX_BATCH_SIZE = 1
     logging.info("script model")
     scripted_rave = script_class(
         pretrained=pretrained,
@@ -804,8 +812,12 @@ def main(argv):
     except Exception as e:
         logging.warning(f"this model will not work with the RAVE VST. \n Caught error : %s"%e)
 
-    logging.info(
-        f"all good ! model exported to {os.path.join(output, model_name)}")
+    if (prior_expected) and (not prior_scripted):
+        logging.info(
+            f"model exported to {os.path.join(output, model_name)}, but without prior (see error above)")
+    else:
+        logging.info(
+            f"all good ! model exported to {os.path.join(output, model_name)}")
 
 
 if __name__ == "__main__":

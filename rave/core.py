@@ -603,7 +603,7 @@ def get_training_device(devices: str | List[str], allow_multi: bool = False):
     device_type = list(device_type)[0]
     assert accelerator_map[device_type].is_available()
     if device_type == "cpu": 
-        return "cpu", []
+        return "cpu", "auto"
     elif device_type == "cuda":
         if devices[0] == "cuda": 
             cuda_idx = setup_gpu()[0]
@@ -619,7 +619,7 @@ def get_training_device(devices: str | List[str], allow_multi: bool = False):
         if len(devices) > 1: assert allow_multi
         return device_type, len(devices)
     elif device_type == "mps":
-        return "mps", 1
+        return "mps", -1
 
 
 def get_workers(workers):
