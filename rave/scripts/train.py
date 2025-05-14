@@ -63,7 +63,7 @@ flags.DEFINE_string('ckpt',
                     None,
                     help='Path to previous checkpoint of the run')
 flags.DEFINE_multi_string('transfer', 
-                          None, 
+                          [], 
                           help="Transfer keys from an existing model. Must be of format path_to_ckpt=>pattern1,pattern2 ; see README.md for more explanation")
 flags.DEFINE_bool('strict_transfer', default=True, help = "allows uncomplete transfer if keys are not found (default: None)")                        
 flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
