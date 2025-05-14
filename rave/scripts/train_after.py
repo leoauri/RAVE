@@ -112,6 +112,7 @@ def main(argv):
         embedding_name = FLAGS.embedding_name or os.path.splitext(os.path.basename(FLAGS.model))[0]
         z_downsample = int(rave_model.encode_params[3])
         z_shape = int(rave_model.encode_params[2])
+        n_channels = rave_model.n_channels
         encode_method = "encode"
         method_kwargs = {}
         logging.info(f"Model found at {FLAGS.model}, dim={z_shape}, ratio={z_downsample}")
@@ -129,6 +130,8 @@ def main(argv):
         # z_downsample = 4096 // z.shape[-1]
         # method_kwargs = {'fidelity': FLAGS.fidelity}
         # logging.info(f"Model found at {run_path}, dim={z_shape}, ratio={z_downsample}")
+    ad.set_gin_constant('CHANNELS', n_channels)
+    ad.set_gin_constant('SAMPLE_RATE', rave_sr)
 
     #
     # [Second step] init augmentation transforms
@@ -214,7 +217,8 @@ def main(argv):
         data_keys += [f"{midi_transform.feature_name}->midi"]
 
     output_format = "{" + ",".join(data_keys) + "}"
-    gin.bind_parameter("diffusion.utils.collate_fn.timbre_augmentation_keys", aug_keys)
+    with gin.unlock_config():
+        gin.bind_parameter("diffusion.utils.collate_fn.timbre_augmentation_keys", aug_keys)
                               
     dataset = []
     for d in FLAGS.db_path: 
