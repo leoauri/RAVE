@@ -19,8 +19,8 @@ flags.DEFINE_multi_string('model', required=True, default=None, help="model path
 flags.DEFINE_multi_string('input', required=True, default=None, help="model inputs (file or folder)")
 flags.DEFINE_multi_enum('mode', 'stream', ['stream', 'full'], help="streaming mode")
 flags.DEFINE_multi_float('loudness', default = 0., help="loudness correction of incoming audio")
-flags.DEFINE_integer('gpu', default=-1, help='GPU to use')
-flags.DEFINE_integer('chunk_size', default=8388608, help="chunk size for encoding/decoding (default: full file)")
+flags.DEFINE_string('device', default="cpu", help='device to use')
+flags.DEFINE_integer('chunk_size', default=None, help="chunk size for encoding/decoding (default: full file)")
 flags.DEFINE_string('out_path', default='generations', help="output path")
 FLAGS = flags.FLAGS
 
@@ -73,8 +73,10 @@ def process_audio(path, mode, loudness, model=None, out_path="caca/", device=tor
 
     # process file
     if mode == "stream":
+        cc.use_cached_conv(True)
         out = process_stream(x, model, device, **kwargs)
     elif mode == "full":
+        cc.use_cached_conv(False)
         out = process_full(x, model, device)
     else:
         raise Exception("mode %s not known"%mode)
@@ -96,15 +98,10 @@ def load_model(model_path, device=torch.device('cpu')):
     if os.path.splitext(model_path)[1] == ".ts":
         model = torch.jit.load(model_path)
     else:
-        config_path = rave.core.search_for_config(model_path)
-        if config_path is None:
-            logging.error('config not found in folder %s'%model_path)
-        gin.parse_config_file(config_path)
-        model = rave.RAVE()
-        run = rave.core.search_for_run(model_path)
-        if run is None:
-            logging.error("run not found in folder %s"%model_path)
-        model = model.load_from_checkpoint(run)
+        try: 
+            model, model_path = rave.load_rave_checkpoint(model_path)
+        except FileNotFoundError:
+            model, model_path = rave.load_rave_checkpoint(model_path, name=None)
     return model.to(device)
 
 def parse_audios(path):
@@ -117,7 +114,7 @@ def parse_audios(path):
 def main(argv):
     audio_files = sum(list(map(parse_audios, FLAGS.input)), [])
     cc.MAX_BATCH_SIZE = 8
-    device = torch.device('cuda:%d'%FLAGS.gpu) if FLAGS.gpu >= 0 else torch.device('cpu')
+    device = torch.device(FLAGS.device)
     processes = []
     for model_path in FLAGS.model:
         logging.info('processing model %s'%model_path)
