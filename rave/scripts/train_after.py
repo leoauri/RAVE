@@ -53,8 +53,8 @@ def parse_flags():
     flags.DEFINE_list('shift_range', default='-6,6', help="pitch shift range (default: -6,6)")
 
     # Feature-related keywords
+    flags.DEFINE_string('structure', default=None, help="Information from strcture (midi or beat).")
     flags.DEFINE_bool('force_features', default=False, help="Forces re-processing of features")
-    flags.DEFINE_bool('structure', default=None, help="Information from strcture (midi or beat).")
     flags.DEFINE_bool('midi', default=False, help="enables MIDI extraction from MIDI files (default: False)")
     flags.DEFINE_bool('beat', default=False, help="enables beat extraction from audio files (default: False)")
 
@@ -98,9 +98,11 @@ def main(argv):
     if FLAGS.structure == "midi":
         logging.info('structure with MIDI only works with midi architecture ; changing')
         FLAGS.config = "midi"      
+        gin.constant("STRUCTURE_TYPE", "midi")
     if FLAGS.config == "midi" and FLAGS.structure != "midi": 
         logging.info('structure with MIDI only works with midi architecture ; changing')
         FLAGS.structure = "midi"
+        gin.constant("STRUCTURE_TYPE", "audio")
 
 
     # [First step] initialize model model (either scripted or checkpoint)
@@ -197,13 +199,15 @@ def main(argv):
 
         # update embedding
         logging.info(f"Parsing embeddings for {data_path}...")
-        ad.update_dataset(data_path, features = [embedding_feature], overwrite=force_recompute_aug, max_db_size=FLAGS.db_max_size)
+        with ad.GinEnv():
+            ad.update_dataset(data_path, features = [embedding_feature], overwrite=force_recompute_aug, max_db_size=FLAGS.db_max_size)
 
         # update features
         force_recompute_feat = FLAGS.force or FLAGS.force_features
         if len(features) > 0:
             logging.info(f"Parsing features for {data_path}...")
-            ad.update_dataset(data_path, features = features, overwrite=force_recompute_feat)
+            with ad.GinEnv():
+                ad.update_dataset(data_path, features = features, overwrite=force_recompute_feat)
 
 
     # [Fifth step] Init datasets
