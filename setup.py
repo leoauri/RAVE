@@ -32,7 +32,7 @@ setuptools.setup(
     entry_points={"console_scripts": [
         "rave = rave.scripts.main_cli:main",
     ]},
-    install_requires=requirements.split("\n"),
+    install_requires=[],
     python_requires='>=3.11',
     include_package_data=True,
 )

@@ -270,10 +270,15 @@ def main(argv):
         gin.bind_parameter("%N_SIGNAL", n_after_latents)
 
     rave_model = rave_model.to('cpu')
+
+    after_transform = None
+    if FLAGS.structure == "beat":
+        assert time_transform
+        after_transform = time_transform
     if FLAGS.arch == "rectified":
-        after_model = RectifiedFlow(device=device, emb_model=rave_model, time_transform=time_transform)
+        after_model = RectifiedFlow(device=device, emb_model=rave_model, time_transform=after_transform)
     elif FLAGS.arch == "edm":
-        after_model = EDM(device=device, emb_model=rave_model, time_transform=time_transform)
+        after_model = EDM(device=device, emb_model=rave_model, time_transform=after_transform)
 
     # [Seventh step] Init data loaders
     logging.info(f"Initializing training")
@@ -315,6 +320,9 @@ def main(argv):
     if after_model.classifier is not None:
         num_el = sum([p.numel() for p in after_model.classifier.parameters()])
         print("Number of parameters - classifier : ", num_el / 1e6, "M")
+
+    if time_transform is not None: 
+        print("With time transform : "%time_transform)
 
     ######### TRAINING #########
     d = {

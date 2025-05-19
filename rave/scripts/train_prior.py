@@ -60,6 +60,7 @@ flags.DEFINE_bool('smoke_test',
                   default=False,
                   help="Run training with n_batches=1 to test the model")
 
+
 def add_gin_extension(config_name: str) -> str:
     if config_name[-4:] != '.gin':
         config_name += '.gin'
