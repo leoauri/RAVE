@@ -1,6 +1,6 @@
 from pathlib import Path
 import shutil
-import os
+import os, re
 import sys
 
 import gin
@@ -32,6 +32,25 @@ def add_gin_extension(config_name: str) -> str:
     if config_name[-4:] != '.gin':
         config_name += '.gin'
     return config_name
+
+
+after_regexp = r'checkpoint(\d+)\D*\.pt'
+def find_after_model(ckpt_path):
+    if not os.path.exists(ckpt_path): raise FileNotFoundError(ckpt_path)
+    if os.path.isdir(ckpt_path):
+        valid_checkpoints = filter(lambda x: os.path.splitext(x)[1] == ".pt", os.listdir(ckpt_path))
+        valid_checkpoints = filter(lambda x: re.search(after_regexp, x), valid_checkpoints)
+        valid_checkpoints = sorted(valid_checkpoints, key=lambda x: int(re.match(after_regexp, x).groups()[0]))
+        if len(valid_checkpoints) == 0: raise FileNotFoundError('No valid checkpoint found in %s'%ckpt_path)
+        ckpt_dir = ckpt_path
+        ckpt_name = valid_checkpoints[-1]
+    else:
+        assert re.search(after_regexp, ckpt_path), "%s is not a valid checkpoint (cannot take restart step)"
+        ckpt_name = os.path.basename(ckpt_path)
+        ckpt_dir = os.path.abspath(os.path.join(ckpt_path, ".."))
+    restart_step = int(re.match(after_regexp, ckpt_name).groups()[0])
+    return ckpt_name, ckpt_dir, restart_step
+
 
 
 def parse_flags():
@@ -71,6 +90,7 @@ def parse_flags():
     flags.DEFINE_integer('n_signal', None, help="chunk size (default: chunk_size // 2)")
     flags.DEFINE_string('ckpt', default=None, help="checkpoint to resume")
     flags.DEFINE_float('fidelity', default=0.99, help="prior target fidelity")
+    flags.DEFINE_float('adv_weight', default=0.05, help="adversarial weight for disentanglement (default=0.05)")
     flags.DEFINE_integer('workers',
                         default=8,
                         help='Number of workers to spawn for dataset loading')
@@ -98,11 +118,9 @@ def main(argv):
     if FLAGS.structure == "midi":
         logging.info('structure with MIDI only works with midi architecture ; changing')
         FLAGS.config = "midi"      
-        gin.constant("STRUCTURE_TYPE", "midi")
     if FLAGS.config == "midi" and FLAGS.structure != "midi": 
         logging.info('structure with MIDI only works with midi architecture ; changing')
         FLAGS.structure = "midi"
-        gin.constant("STRUCTURE_TYPE", "audio")
 
 
     # [First step] initialize model model (either scripted or checkpoint)
@@ -242,32 +260,40 @@ def main(argv):
         data = val_dataset[0]
     except Exception as e: 
         logging.error("Caught error when testing data fetching. Got : ")
-        e.with_traceback()
+        raise e
    
     
     # [Sixth step] Init AFTER models
     logging.info(f"Initializing AFTER model")
 
-    gin.clear_config()
-    
-    if FLAGS.ckpt is not None: 
-        config_path = os.path.join(FLAGS.out_path, FLAGS.name, "config.gin")
-        with gin.unlock_config():
-            gin.parse_config_files_and_bindings([config_path], [FLAGS.override])
-    else:
-        gin.parse_config_files_and_bindings(
-            [add_gin_extension(FLAGS.config)],
-            FLAGS.override,
-        )
-
+    structure_type = "midi" if FLAGS.structure == "midi" else "audio"
     if not FLAGS.n_signal:
         FLAGS.n_signal = (chunk_size // 2)
     n_after_latents = FLAGS.n_signal // z_downsample
     logging.info("learned latent steps : %s"%(n_after_latents))
+
+    gin.constant("IN_SIZE", z_shape)
+    gin.constant("STRUCTURE_TYPE", structure_type)
+    gin.constant("N_SIGNAL", n_after_latents)
+
+    if FLAGS.ckpt is not None: 
+        model_name, model_dir, restart_step = find_after_model(FLAGS.ckpt)
+        config_path = os.path.join(model_dir, "config.gin")
+        logging.info('Taking checkpoint at : %s'%os.path.join(model_dir, model_name))
+        gin.parse_config_files_and_bindings([config_path], FLAGS.override)
+    else:
+        model_dir = os.path.join(FLAGS.out_path, FLAGS.name)
+        gin.parse_config_files_and_bindings(
+            [add_gin_extension(FLAGS.config)],
+            FLAGS.override,
+        )
+        restart_step = None
+
     with gin.unlock_config():
         gin.bind_parameter("diffusion.utils.collate_fn.ae_ratio", z_downsample)
-        gin.bind_parameter("%IN_SIZE", z_shape)
-        gin.bind_parameter("%N_SIGNAL", n_after_latents)
+        gin.bind_parameter("after.diffusion.model.fit.adversarial_weight", FLAGS.adv_weight)
+        gin.bind_parameter('after.diffusion.utils.collate_fn.n_signal', n_after_latents)
+        gin.bind_parameter('after.diffusion.utils.collate_fn.structure_type', structure_type)
 
     rave_model = rave_model.to('cpu')
     if FLAGS.arch == "rectified":
@@ -295,9 +321,8 @@ def main(argv):
     )
 
     # [Eight step] Prepare checkpoints & logging number of paramters
-    dataset._loader[0].get_array('musicnet_4f3923fb55')
     logging.info(f"Preparing training...")
-    model_dir = os.path.join(FLAGS.out_path, FLAGS.name)
+
     os.makedirs(model_dir, exist_ok=True)
     num_el = 0
     for p in after_model.net.parameters():
@@ -321,7 +346,7 @@ def main(argv):
         "model_dir": model_dir,
         "dataloader": train_loader,
         "validloader": val_loader,
-        "restart_step": FLAGS.ckpt,
+        "restart_step": restart_step,
     }
 
     logging.info(f"Starting training...")

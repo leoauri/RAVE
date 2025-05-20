@@ -33,6 +33,7 @@ setuptools.setup(
         "rave = rave.scripts.main_cli:main",
     ]},
     install_requires=requirements.split("\n"),
+    extras_require={'after': ['after @ git+https://github.com/acids-ircam/AFTER@rave']},
     python_requires='>=3.11',
     include_package_data=True,
 )
