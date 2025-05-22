@@ -272,16 +272,17 @@ def main(argv):
     n_after_latents = FLAGS.n_signal // z_downsample
     logging.info("learned latent steps : %s"%(n_after_latents))
 
-    gin.constant("IN_SIZE", z_shape)
-    gin.constant("STRUCTURE_TYPE", structure_type)
-    gin.constant("N_SIGNAL", n_after_latents)
 
     if FLAGS.ckpt is not None: 
         model_name, model_dir, restart_step = find_after_model(FLAGS.ckpt)
         config_path = os.path.join(model_dir, "config.gin")
         logging.info('Taking checkpoint at : %s'%os.path.join(model_dir, model_name))
         gin.parse_config_files_and_bindings([config_path], FLAGS.override)
+        logging.info('Loaded config : %s'%gin.config_str())
     else:
+        gin.constant("IN_SIZE", z_shape)
+        gin.constant("STRUCTURE_TYPE", structure_type)
+        gin.constant("N_SIGNAL", n_after_latents)
         model_dir = os.path.join(FLAGS.out_path, FLAGS.name)
         gin.parse_config_files_and_bindings(
             [add_gin_extension(FLAGS.config)],
@@ -359,6 +360,12 @@ def main(argv):
 
     logging.info(f"Starting training...")
     if FLAGS.smoke_test: 
+        import time
+        os.makedirs("logs", exist_ok=True)
+        with open(f"logs/log_model_{time.strftime('%y%m%d-%H%M%S')}.txt", 'w+') as f: print(after_model, file=f)
+        with open(f"logs/log_config_{time.strftime('%y%m%d-%H%M%S')}.txt", 'w+') as f: print(gin.config_str(), file=f)
+        with open(f"logs/log_opconfig_{time.strftime('%y%m%d-%H%M%S')}.txt", 'w+') as f: print(gin.operative_config_str(), file=f)
+        
         logging.info('smoke_test succeeded!')
         pass
     else:
