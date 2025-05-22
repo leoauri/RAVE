@@ -15,7 +15,7 @@ CUSTOM_PATH: Path = Path(__file__).parent.parent / "configs"
 gin.add_config_file_search_path(BASE_PATH)
 gin.add_config_file_search_path(CUSTOM_PATH)
 gin.add_config_file_search_path(BASE_PATH.joinpath('configs'))
-if not BASE_PATH.joinpath('configs', 'augmentations').exists():
+if not (Path(ad.__file__).parent / "configs" / "transforms").exists():
     BASE_PATH.joinpath('configs', 'augmentations').symlink_to(Path(ad.__file__).parent / "configs" / "transforms")
 
 gin.add_config_file_search_path(BASE_PATH.joinpath('configs', 'augmentations'))
