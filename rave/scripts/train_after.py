@@ -280,13 +280,13 @@ def main(argv):
         gin.parse_config_files_and_bindings([config_path], FLAGS.override)
         logging.info('Loaded config : %s'%gin.config_str())
     else:
-        gin.constant("IN_SIZE", z_shape)
-        gin.constant("STRUCTURE_TYPE", structure_type)
-        gin.constant("N_SIGNAL", n_after_latents)
+        # gin.bind_parameter("%IN_SIZE", z_shape)
+        # gin.bind_parameter("%STRUCTURE_TYPE", structure_type)
+        # gin.bind_parameter("%N_SIGNAL", n_after_latents)
         model_dir = os.path.join(FLAGS.out_path, FLAGS.name)
         gin.parse_config_files_and_bindings(
             [add_gin_extension(FLAGS.config)],
-            FLAGS.override,
+            FLAGS.override + [f'IN_SIZE={z_shape}', f'STRUCTURE_TYPE="{structure_type}\"', f"N_SIGNAL={n_after_latents}"],
         )
         restart_step = None
 
