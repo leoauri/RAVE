@@ -67,7 +67,7 @@ flags.DEFINE_string('ckpt',
                     help='Path to previous checkpoint of the run')
 flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
 flags.DEFINE_integer('workers',
-                     default=None,
+                     default=0,
                      help='Number of workers to spawn for dataset loading')
 flags.DEFINE_multi_string('device', default="auto", help="training device (default: auto. Can be cuda, cuda:0, ..., mps, etc.)")
 flags.DEFINE_bool('derivative',
@@ -99,7 +99,7 @@ def add_gin_extension(config_name: str) -> str:
 
 def parse_augmentations(augmentations, sr):
     for a in augmentations:
-        with ad.GinEnv(paths=[Path(rave.__file__).parent / "configs" / "augmentations"]):
+        with rave.core.GinEnv(paths=[Path(rave.__file__).parent / "configs" / "augmentations"]):
             gin.parse_config_file(a)
             parse_transform()
             gin.clear_config()

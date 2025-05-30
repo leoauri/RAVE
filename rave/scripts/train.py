@@ -68,7 +68,7 @@ flags.DEFINE_multi_string('transfer',
 flags.DEFINE_bool('strict_transfer', default=True, help = "allows uncomplete transfer if keys are not found (default: None)")                        
 flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
 flags.DEFINE_integer('workers',
-                     default=None,
+                     default=0,
                      help='Number of workers to spawn for dataset loading')
 flags.DEFINE_multi_string('device', default="auto", help="training device (default: auto. Can be cuda, cuda:0, ..., mps, etc.)")
 flags.DEFINE_bool('derivative',
@@ -139,7 +139,7 @@ def main(argv):
     torch.backends.cudnn.benchmark = True
 
     # check dataset channels
-    n_channels = rave.dataset.get_training_channels(FLAGS.db_path, FLAGS.channels)
+    n_channels = rave.dataset.get_training_channels(FLAGS.db_path, FLAGS.channels) if not FLAGS.channels else FLAGS.channels
     FLAGS.override.append('RAVE.n_channels=%d'%n_channels)
     
     # parse configuration
@@ -175,8 +175,8 @@ def main(argv):
     gin.constant('SAMPLE_RATE', model.sr)
     
     # parse augmentations
+    augmentations = rave.parse_augmentations(map(rave.add_gin_extension, FLAGS.augment), sr=model.sr)
     with gin.unlock_config():
-        augmentations = rave.parse_augmentations(map(rave.add_gin_extension, FLAGS.augment), sr=model.sr)
         gin.bind_parameter('dataset.get_dataset.augmentations', augmentations)
 
     # parse datasset
@@ -237,7 +237,7 @@ def main(argv):
         if run is None: 
             run = rave.core.search_for_run(FLAGS.ckpt, None)
             if run is None:
-                logging.error('could not find model with ckpt=%s. Maybe provide a more detailed path: %s'%FLAGS.ckpt)
+                logging.error('could not find model with ckpt=%s. Maybe provide a more detailed path'%FLAGS.ckpt)
                 exit()
 
     trainer = pl.Trainer(
@@ -258,7 +258,9 @@ def main(argv):
 
 
     with open(os.path.join(FLAGS.out_path, RUN_NAME, "config.gin"), "w") as config_out:
-        config_out.write(gin.operative_config_str())
+        config_out.write(gin.config_str())
+
+    
 
     trainer.fit(model, train, val, ckpt_path=run)
 

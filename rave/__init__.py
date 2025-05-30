@@ -6,7 +6,6 @@ import cached_conv as cc
 import gin
 import torch
 import acids_dataset as ad
-from acids_dataset.utils import GinEnv
 
 
 BASE_PATH: Path = Path(__file__).parent
@@ -15,7 +14,7 @@ CUSTOM_PATH: Path = Path(__file__).parent.parent / "configs"
 gin.add_config_file_search_path(BASE_PATH)
 gin.add_config_file_search_path(CUSTOM_PATH)
 gin.add_config_file_search_path(BASE_PATH.joinpath('configs'))
-if not (Path(ad.__file__).parent / "configs" / "transforms").exists():
+if not BASE_PATH.joinpath('configs', 'augmentations').exists():
     BASE_PATH.joinpath('configs', 'augmentations').symlink_to(Path(ad.__file__).parent / "configs" / "transforms")
 
 gin.add_config_file_search_path(BASE_PATH.joinpath('configs', 'augmentations'))
@@ -66,7 +65,7 @@ def load_rave_checkpoint(model_path, n_channels=1, ema=False, name="last.ckpt", 
         raise FileNotFoundError(str(model_path))
     if model_path.suffix == ".ts":
         return torch.jit.load(model_path)
-    with GinEnv():
+    with core.GinEnv():
         config_file = core.search_for_config(model_path) 
         if config_file is None:
             print('no configuration file found at address :'%model_path)
@@ -104,10 +103,9 @@ def add_gin_extension(config_name: str) -> str:
 
 def parse_augmentations(augmentations, sr):
     for a in augmentations:
-        with ad.GinEnv(paths=[Path(__file__).parent / "configs" / "augmentations"]):
+        with core.GinEnv(paths=[Path(__file__).parent / "configs" / "augmentations"]):
             gin.parse_config_file(a)
             parse_transform()
-            gin.clear_config()
     return get_augmentations()
 
 

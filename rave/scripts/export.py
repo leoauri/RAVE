@@ -755,7 +755,7 @@ def main(argv):
         else:
             gin.clear_config()
             logging.info("prior config file : ", prior_config_file)
-            with ad.GinEnv():
+            with rave.core.GinEnv():
                 gin.constant('SAMPLE_RATE', pretrained.sr)
                 gin.parse_config_file(prior_config_file)
                 PRIOR = rave.core.search_for_run(FLAGS.prior)

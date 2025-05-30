@@ -217,14 +217,14 @@ def main(argv):
 
         # update embedding
         logging.info(f"Parsing embeddings for {data_path}...")
-        with ad.GinEnv():
+        with rave.core.GinEnv():
             ad.update_dataset(data_path, features = [embedding_feature], overwrite=force_recompute_aug, max_db_size=FLAGS.db_max_size)
 
         # update features
         force_recompute_feat = FLAGS.force or FLAGS.force_features
         if len(features) > 0:
             logging.info(f"Parsing features for {data_path}...")
-            with ad.GinEnv():
+            with rave.core.GinEnv():
                 ad.update_dataset(data_path, features = features, overwrite=force_recompute_feat)
 
 

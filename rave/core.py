@@ -1,4 +1,8 @@
 import json
+from types import ModuleType
+import copy
+import gin.config 
+import dill
 import re
 from typing import List
 import os
@@ -696,3 +700,89 @@ def get_finetune_keys(model, train=[], freeze=[]):
         keys_to_remove = list(filter(lambda x: re.match(f, x) is not None, weights_to_train))
         weights_to_train.difference_update(keys_to_remove)
     return list(sorted(weights_to_train))
+
+
+def copy_for_gin_config_copy(obj):
+    if isinstance(obj, list):
+        return list(map(copy_for_gin_config_copy, obj))
+    elif isinstance(obj, tuple):
+        return tuple(map(copy_for_gin_config_copy, obj))
+    else:
+        if isinstance(obj, gin.config.ConfigurableReference):
+            new_obj = gin.config.ConfigurableReference(obj._scoped_selector, obj._evaluate)
+            return new_obj
+        else:
+            return copy.deepcopy(obj)
+
+
+def copy_gin_config(config):
+    copy_config = {}
+    for field_ref, field_dict in config.items():
+        field_copy = {}
+        for k, v in field_dict.items(): 
+            field_copy[k] = copy_for_gin_config_copy(v)
+        copy_config[field_ref] = field_copy
+    return copy_config
+
+def checklist(item, n=1, copy=False):
+    """Repeat list elemnts
+    """
+    if not isinstance(item, (list, )):
+        if copy:
+            item = [copy.deepcopy(item) for _ in range(n)]
+        elif isinstance(item, torch.Size):
+            item = [i for i in item]
+        else:
+            item = [item]*n
+    return item
+
+class GinEnv(object):
+    def __init__(self, paths=[], configs=[], bindings=[], clear:bool = True):
+        self._paths = checklist(paths)
+        self._configs = checklist(configs)
+        self._bindings = checklist(bindings)
+        self.keep_constants = True
+        self._dict = None
+        self._clear = clear 
+
+    def _copy_gin_dict(self):
+        gin_dict = {}
+        for k, v in gin.config.__dict__.items(): 
+            if isinstance(v, ModuleType) or callable(v): continue
+            try:
+                if k == "_SCOPE_MANAGER":
+                    gin_dict[k] = {'active_scopes': v.active_scopes,
+                                   'current_scope': v.current_scope,
+                                   '_active_scopes': v._active_scopes}
+                elif k == "_CONFIG":
+                    gin_dict[k] = copy_gin_config(v)
+                else:
+                    gin_dict[k] = copy.deepcopy(v)
+            except: 
+                try:
+                    gin_dict[k] = dill.dumps(v)
+                except: 
+                    gin_dict[k] = v
+        return gin_dict
+    
+    def __enter__(self):
+        self._dict = self._copy_gin_dict()
+        if self._clear:
+            gin.clear_config()
+        if self.keep_constants: 
+            gin.config._CONSTANTS = self._dict['_CONSTANTS']
+        for p in self._paths: 
+            gin.add_config_file_search_path(p)
+        if len(self._configs) or len(self._bindings):
+            gin.parse_config_files_and_bindings(self._configs, self._bindings)
+        gin.unlock_config()
+
+    def __exit__(self, *args):
+        gin.clear_config()
+        scope_manager = gin.config._ScopeManager()
+        scope_manager.__dict__.update(self._dict['_SCOPE_MANAGER'])
+        self._dict['_SCOPE_MANAGER'] = scope_manager
+        for k, v in self._dict.items():
+            if isinstance(v, bytes):
+                self._dict[k] = dill.loads(v)
+        gin.config.__dict__.update(self._dict)
