@@ -76,7 +76,6 @@ def get_dataset(db_path,
         channels=n_channels
     )
 
-
 def get_channels_from_dataset(db_path):
     with open(os.path.join(db_path, 'metadata.yaml'), 'r') as metadata:
         metadata = yaml.safe_load(metadata)
