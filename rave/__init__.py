@@ -8,17 +8,22 @@ import torch
 import acids_dataset as ad
 
 
-BASE_PATH: Path = Path(__file__).parent
-CUSTOM_PATH: Path = Path(__file__).parent.parent / "configs"
+BASE_PATH: Path = Path(__file__).parent.resolve()
+CUSTOM_PATH: Path = (Path(__file__).parent.parent / "configs").resolve()
 
 gin.add_config_file_search_path(BASE_PATH)
 gin.add_config_file_search_path(CUSTOM_PATH)
 gin.add_config_file_search_path(BASE_PATH.joinpath('configs'))
-if not BASE_PATH.joinpath('configs', 'augmentations').exists():
-    BASE_PATH.joinpath('configs', 'augmentations').symlink_to(Path(ad.__file__).parent / "configs" / "transforms")
 
-gin.add_config_file_search_path(BASE_PATH.joinpath('configs', 'augmentations'))
+# AUGMENTATION_CONFIG_PATH = BASE_PATH.joinpath('configs', 'augmentations')
+# AUGMENTATION_CONFIG_PATH = Path(ad.__file__).parent.resolve() / "configs" / "transforms"
+# if (AUGMENTATION_CONFIG_PATH.resolve() != target_augment_config_path) or (not AUGMENTATION_CONFIG_PATH.exists()): 
+#     if (AUGMENTATION_CONFIG_PATH.exists()):
+#         os.remove(AUGMENTATION_CONFIG_PATH)
+#     AUGMENTATION_CONFIG_PATH.symlink_to(target_augment_config_path)
 
+AUGMENTATION_CONFIG_PATH = Path(ad.__file__).parent.resolve() / "configs" / "transforms"
+gin.add_config_file_search_path(AUGMENTATION_CONFIG_PATH)
 
 
 def __safe_configurable(name):
