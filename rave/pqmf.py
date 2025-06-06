@@ -307,6 +307,11 @@ class CachedPQMF(PQMF):
                     bias=False,
                 )
             self.forward_conv.weight.data.copy_(forward_weight.data)
+            if hasattr(self.forward_conv, "cache"):
+                if f"{prefix}forward_conv.cache.pad" in local_state_dict:
+                    n_channels = local_state_dict[ f"{prefix}forward_conv.cache.pad"].shape[1]
+                    self.forward_conv.cache.init_cache(torch.zeros(1, n_channels, 1))
+                    self.forward_conv.cache.pad.copy_(local_state_dict[f"{prefix}forward_conv.cache.pad"])
             
         inverse_weight = local_state_dict.get(f'{prefix}inverse_conv.weight') 
         if inverse_weight is not None:
@@ -318,18 +323,12 @@ class CachedPQMF(PQMF):
                     bias=False,
                 )
             self.inverse_conv.weight.data.copy_(inverse_weight.data)
+            if hasattr(self.forward_conv, "cache"):
+                if f"{prefix}inverse_conv.cache.pad" in local_state_dict:
+                    n_channels = local_state_dict[ f"{prefix}inverse_conv.cache.pad"].shape[1]
+                    self.inverse_conv.cache.init_cache(torch.zeros(1, n_channels, 1))
+                    self.inverse_conv.cache.pad.data.copy_(local_state_dict[f"{prefix}inverse_conv.cache.pad"])
             
-
-    # def state_dict(self, *args, **kwargs): 
-    #     state_dict = super().state_dict()
-    #     if hasattr(self.forward_conv):
-    #         for k in dict(self.forward_conv.named_parameters()).keys():
-    #             del state_dict[f'forward_conv.{k}']
-    #     if hasattr(self, self.inverse_conv):
-    #         for k in dict(self.inverse_conv.named_parameters()).keys():
-    #             del state_dict[f'inverse_conv.{k}']
-    #     return state_dict
-
 
     def initialized(self):
         return super().initialized() and hasattr(self, "forward_conv") and hasattr(self, "inverse_conv")
