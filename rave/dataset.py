@@ -72,7 +72,7 @@ def get_dataset(db_path,
 
     return ad.datasets.AudioDataset(
         db_path,
-        transforms=transform_list,
+        transforms=ad.transforms.Compose(*transform_list),
         channels=n_channels
     )
 
@@ -95,13 +95,12 @@ def get_training_channels(db_path, target_channels):
 
 # Utilitary for GIN recording of augmentations
 
-
 _augmentations = []
 
 @gin.configurable(module="transforms")
 def parse_transform(transform):
     global _augmentations
-    _augmentations.append(transform)
+    _augmentations.append(transform())
 
 def get_augmentations():
     return _augmentations
