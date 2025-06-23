@@ -628,14 +628,13 @@ def get_training_device(devices: str | List[str], allow_multi: bool = False):
 
 def get_workers(workers):
     # get data-loader
+    if workers is None: workers = -1
     if os.name == "nt" or sys.platform == "darwin":
         #TODO re-check
         num_workers = 0
     else:
-        if workers is None: 
+        if workers < 0:
             num_workers = multiprocessing.cpu_count()
-        elif workers <= 0:
-            num_workers = 0 
         else:
             num_workers = workers
     return num_workers
@@ -644,6 +643,7 @@ def get_workers(workers):
 # transfer / fine-tune related callbacks
 
 def parse_weight_shortcut(weight_pattern: str):
+    print('weight patrtern :', weight_pattern)
     if weight_pattern == "all":
         return r".*"
     elif weight_pattern == "encoder":

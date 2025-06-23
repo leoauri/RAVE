@@ -22,9 +22,6 @@ gin.add_config_file_search_path(BASE_PATH.joinpath('configs'))
 #         os.remove(AUGMENTATION_CONFIG_PATH)
 #     AUGMENTATION_CONFIG_PATH.symlink_to(target_augment_config_path)
 
-AUGMENTATION_CONFIG_PATH = Path(ad.__file__).parent.resolve() / "configs" / "transforms"
-gin.add_config_file_search_path(AUGMENTATION_CONFIG_PATH)
-
 
 def __safe_configurable(name):
     try: 
@@ -32,9 +29,12 @@ def __safe_configurable(name):
     except ValueError:
         setattr(cc, name, gin.external_configurable(getattr(cc, name), module="cc"))
 
-# cc.get_padding = gin.external_configurable(cc.get_padding, module="cc")
-# cc.Conv1d = gin.external_configurable(cc.Conv1d, module="cc")
-# cc.ConvTranspose1d = gin.external_configurable(cc.ConvTranspose1d, module="cc")
+if ad.__file__:
+    AUGMENTATION_CONFIG_PATH = Path(ad.__file__).parent.resolve() / "configs" / "transforms"
+    gin.add_config_file_search_path(AUGMENTATION_CONFIG_PATH)
+else:
+    print('[Warning] Could not locate acids_dataset ; augmentations not available')
+
 
 __safe_configurable("get_padding")
 __safe_configurable("Conv1d")
@@ -64,7 +64,7 @@ def get_run_name(run_path):
         return None
     return ((version_path / "..").resolve()).stem
 
-def load_rave_checkpoint(model_path, n_channels=1, ema=False, name="last.ckpt", remove_keys=None):
+def load_rave_checkpoint(model_path, n_channels=1, ema=False, name="last.ckpt", remove_keys=None, configs=[], overrides=[]):
     model_path = Path(model_path)
     if not model_path.exists():
         raise FileNotFoundError(str(model_path))
@@ -74,7 +74,7 @@ def load_rave_checkpoint(model_path, n_channels=1, ema=False, name="last.ckpt", 
         config_file = core.search_for_config(model_path) 
         if config_file is None:
             print('no configuration file found at address :'%model_path)
-        gin.parse_config_file(config_file)
+        gin.parse_config_files_and_bindings([config_file] + configs, overrides)
         run_path = core.search_for_run(model_path, name=name)
         if run_path is None: 
             raise FileNotFoundError("no model found with name: %s"%name)

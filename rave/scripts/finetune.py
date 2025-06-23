@@ -69,6 +69,7 @@ flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
 flags.DEFINE_integer('workers',
                      default=0,
                      help='Number of workers to spawn for dataset loading')
+flags.DEFINE_boolean('update_pca', default=None, help="Does the model updates its inner PCA (not recommanded for small transfer datasets)")
 flags.DEFINE_multi_string('device', default="auto", help="training device (default: auto. Can be cuda, cuda:0, ..., mps, etc.)")
 flags.DEFINE_bool('derivative',
                   default=False,
@@ -113,12 +114,13 @@ def main(argv):
     # parse configuration
     if FLAGS.reset_discriminator: 
         remove_keys = ["discriminator.*"]
+        FLAGS.train.append('discriminator')
     else:
         remove_keys = None
     try:
-        model, run_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights, remove_keys=remove_keys)
+        model, run_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights, remove_keys=remove_keys, configs=['finetune.gin'])
     except FileNotFoundError:
-        model, run_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights, name=None, remove_keys=remove_keys)
+        model, run_path = rave.load_rave_checkpoint(FLAGS.run, ema=FLAGS.ema_weights, name=None, remove_keys=remove_keys, configs=['finetune.gin'])
     RUN_NAME = rave.get_run_name(run_path)
 
     if FLAGS.derivative:
@@ -130,6 +132,7 @@ def main(argv):
     with gin.unlock_config():
         augmentations = parse_augmentations(map(add_gin_extension, FLAGS.augment), sr=model.sr)
         gin.bind_parameter('dataset.get_dataset.augmentations', augmentations)
+        gin.parse_config_file('finetune.gin')
 
     # parse keys to train / freeze 
     training_keys = rave.core.get_finetune_keys(model, FLAGS.train, FLAGS.freeze)
@@ -149,6 +152,17 @@ def main(argv):
                                        n_channels=model.n_channels)
 
     train, val = rave.dataset.split_dataset(dataset, percent=98, training_name=RUN_NAME)
+    if len(dataset) < model.latent_size:
+        train, val = dataset, dataset
+
+    if FLAGS.update_pca is None:
+        FLAGS.update_pca = len(val) > rave.model.MAX_LATENT_FOR_VALIDATION
+    elif FLAGS.update_pca: 
+        if len(val) < rave.core.model.MAX_LATENT_FOR_VALIDATION:
+            logging.error(f'Cannot update PCA on {len(val)} examples. Set --update_pca empty, or explicitely pass --noupdate_pca')
+            exit()
+        logging.info("setting update_pca to %s"%FLAGS.update_pca)
+    model.update_pca = FLAGS.update_pca
 
     num_workers = rave.core.get_workers(FLAGS.workers)
     train = DataLoader(train,
@@ -176,7 +190,7 @@ def main(argv):
         val_check['limit_train_batches'] = 1
         val_check['limit_val_batches'] = 1
 
-    os.makedirs(os.path.join(FLAGS.out_path, RUN_NAME), exist_ok=True)
+    os.makedirs(os.path.join(FLAGS.out_path, FLAGS.name), exist_ok=True)
 
     accelerator, devices = rave.core.get_training_device(FLAGS.device, allow_multi=True)
     
@@ -200,7 +214,7 @@ def main(argv):
     trainer = pl.Trainer(
         logger=pl.loggers.TensorBoardLogger(
             FLAGS.out_path,
-            name=RUN_NAME,
+            name=FLAGS.name,
         ),
         accelerator=accelerator,
         devices=devices,
@@ -209,12 +223,12 @@ def main(argv):
         max_steps=FLAGS.max_steps,
         profiler="simple",
         enable_progress_bar=FLAGS.progress,
-        log_every_n_steps=min(30, len(dataset)),
+        log_every_n_steps=min(30, len(train)),
         **val_check,
     )
 
 
-    with open(os.path.join(FLAGS.out_path, RUN_NAME, "config.gin"), "w") as config_out:
+    with open(os.path.join(FLAGS.out_path, FLAGS.name, "config.gin"), "w") as config_out:
         config_out.write(gin.operative_config_str())
 
     trainer.fit(model, train, val, ckpt_path=run)

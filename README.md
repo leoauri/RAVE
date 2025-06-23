@@ -51,21 +51,25 @@ Training a RAVE model usually involves 3 separate steps, namely _dataset prepara
 
 ### Dataset preparation
 
-You can know prepare a dataset using two methods: regular and lazy. Lazy preprocessing allows RAVE to be trained directly on the raw files (i.e. mp3, ogg), without converting them first. **Warning**: lazy dataset loading will increase your CPU load by a large margin during training, especially on Windows. This can however be useful when training on large audio corpus which would not fit on a hard drive when uncompressed. In any case, prepare your dataset using
+<!-- You can know prepare a dataset using two methods: regular and lazy. Lazy preprocessing allows RAVE to be trained directly on the raw files (i.e. mp3, ogg), without converting them first. **Warning**: lazy dataset loading will increase your CPU load by a large margin during training, especially on Windows. This can however be useful when training on large audio corpus which would not fit on a hard drive when uncompressed. In any case, prepare your dataset using -->
+
+Before making a training, you will need to prepare the data. The v2.4 version leverages the [acids-dataset](https://github.com/acids-ircam/acids-dataset) library for data pre-processing, be sure to check the github to access all the feature's library. A shortcut is given for a direct use within `rave`:
 
 ```bash
-rave preprocess --input_path /audio/folder --output_path /dataset/path --channels X (--lazy)
+rave preprocess --input_path /audio/folder --output_path /processed/path --channels X --device your_device
 ```
+
+By default, audio files are splitted in chunks of 262144 samples, with a 50% overlap. Be careful then, don't be surprised if the pre-processed folder is larger than your original data.
 
 ### Training
 
-RAVEv2 has many different configurations. The improved version of the v1 is called `v2`, and can therefore be trained with
+After the dataset pre-processing, you can start training your RAVE model. 
 
 ```bash
-rave train --config v2 --db_path /dataset/path --out_path /model/out --name give_a_name --channels X
+rave train --db_path /processed/path --out_path /model/out --name give_a_name --channels X
 ```
 
-We also provide a discrete configuration, similar to SoundStream or EnCodec
+Several configurations are available, that you can give using the `--config` keyword (default is `v2`). For example, you can train a _discrete_ configuration, similar to SoundStream or EnCodec, by providing 
 
 ```bash
 rave train --config discrete ...
@@ -74,7 +78,7 @@ rave train --config discrete ...
 By default, RAVE is built with non-causal convolutions. If you want to make the model causal (hence lowering the overall latency of the model), you can use the causal mode
 
 ```bash
-rave train --config discrete --config causal ...
+rave train --config v2 --config causal ...
 ```
 
 Data augmentations are also available to improve the model's generalization in low data regimes. You can add data augmentations by adding augmentation configuration files with the `--augment` keyword :
@@ -161,7 +165,7 @@ Many other configuration files are available in `rave/configs` and can be combin
 </tr>
 
 <tr>
-<td rowspan=3>Others</td>
+<td rowspan=5>Others</td>
 <td>causal</td>
 <td>Use causal convolutions</td>
 </tr>
@@ -177,19 +181,13 @@ Many other configuration files are available in `rave/configs` and can be combin
 </tr>
 
 <tr>
-<td rowspan=3>Augmentations</td>
-<td>mute</td>
-<td>Randomly mutes data batches (default prob : 0.1). Enforces the model to learn silence</td>
+<td>adv_at_start</td>
+<td>Enables adversarial learning at start (Experimental)</td>
 </tr>
 
 <tr>
-<td>compress</td>
-<td>Randomly compresses the waveform (equivalent to light non-linear amplification of batches)</td>
-</tr>
-
-<tr>
-<td>gain</td>
-<td>Applies a random gain to waveform (default range : [-6, 3]) </td>
+<td>no_encoder_freeze</td>
+<td>Does not freeze the encoder at phase 2 (latent space is still trained)</td>
 </tr>
 
 </tbody>
@@ -204,6 +202,28 @@ rave export --name export_name --run /path/to/your/run --out_path /out/path/for/
 ```
 
 Setting the `--streaming` flag will enable cached convolutions, making the model compatible with realtime processing. **If you forget to use the streaming mode and try to load the model in Max, you will hear clicking artifacts.**
+
+### Fine-tune
+
+Since v2.4, a specific function allow you to fine-tune a model from an existing checkpoint. The difference between fine-tuning and training is that generally you fine-tune on another dataset that the original training, and freeze / train only some parameters of the model. For example, training only the encoder (for example, a model trained on flute) with another dataset (for example, a model trained on voice) allows to increase the timbre transfer between flute and voice. For example : 
+
+```bash
+rave finetune --name run_name --run /path/to/original/run --db_path /path/to/db --out_path /path/to/finetuned/model --train encoder
+``` 
+
+For the `train` keyword, you can either use specific words (`all`, `encoder`, `decoder`, `discriminator`), or a list of weights. For example : 
+```bash
+rave finetune --name run_name --run /path/to/original/run --db_path /path/to/db --out_path /path/to/finetuned/model --train "decoder.net.[0-3].*"
+```
+will only fine-tune the three first layers of the decoder. To access all the keys, you can use Python : 
+
+```python
+import rave
+
+model, path = rave.load_rave_checkpoint("path/to/run")
+print(model.state_dict().keys())
+```
+
 
 #### Note: since v2.4, this argument defaults to True.
 
@@ -266,7 +286,7 @@ Other attributes, such as `enable` or `gpu` can enable/disable computation, or u
 A batch generation script has been released in v2.3 to allow transformation of large amount of files
 
 ```bash
-rave generate model_path path_1 path_2 --out out_path
+rave generate --model model_path --input path_1 --input path_2 --out out_path
 ```
 
 where `model_path` is the path to your trained model (original or scripted), `path_X` a list of audio files or directories, and `out_path` the out directory of the generations.

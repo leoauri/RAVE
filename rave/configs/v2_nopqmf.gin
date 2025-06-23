@@ -6,7 +6,6 @@ from rave import core
 from rave import dataset
 from rave import blocks
 from rave import discriminator
-from rave import transforms
 
 import torch.nn as nn
 
@@ -35,16 +34,16 @@ core.get_augmented_latent_size:
 
 
 # AUGMENTATIONS
-dataset.get_dataset:
-    augmentations = [
-        @augmentations/transforms.RandomCompress()
-    ]
+# dataset.get_dataset:
+#     augmentations = [
+#         @augmentations/transforms.RandomCompress()
+#     ]
 
-augmentations/transforms.RandomCompress:
-    amp_range = [-60,-10]
-    threshold=-40
-    prob = 0.5
-    sr=%SAMPLING_RATE
+# augmentations/transforms.RandomCompress:
+#     amp_range = [-60,-10]
+#     threshold=-40
+#     prob = 0.5
+#     sr=%SAMPLING_RATE
 
 # ENCODER
 blocks.EncoderV2:
@@ -117,7 +116,7 @@ rave.RAVE:
 
 rave.BetaWarmupCallback:
     initial_value = 1e-6
-    target_value = 1e-1
+    target_value = 5e-2
     warmup_len = 500000
     log = False
     

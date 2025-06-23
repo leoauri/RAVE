@@ -83,12 +83,19 @@ def process_audio(path, mode, loudness, model=None, out_path="caca/", device=tor
 
     # save file
     filename = Path(filetarget)
+    model_path = Path(model_path)
     target_path = Path(out_path)
     if model_path is not None:
-        model_name = Path(model_path).stem
+        if model_path.parent.stem == "checkpoints": 
+            model_name = (Path(model_path) / ".." / ".." / "..").resolve().stem
+        elif str(model_path.parent.stem).startswith("version_"):
+            model_name = (Path(model_path) / ".." / "..").resolve().stem
+        else:
+            model_name = Path(model_path).stem
         target_path = target_path / model_name
     target_path = target_path / mode / f"{filename.stem}_loudness={loudness}.wav"
     os.makedirs(target_path.parent, exist_ok=True)
+    logging.info('saved file at %s...'%target_path)
     torchaudio.save(str(target_path), out[0].cpu(), sample_rate=model.sr)
 
 def load_model(model_path, device=torch.device('cpu')):
@@ -106,9 +113,12 @@ def load_model(model_path, device=torch.device('cpu')):
 
 def parse_audios(path):
     audio_files = []
-    for root, _, files in os.walk(path):
-        valid_files = list(filter(lambda x: os.path.splitext(x)[1].lower() in valid_exts, files))
-        audio_files.extend([(os.path.join(root, f), os.path.join(re.sub(path, '', root), f)) for f in valid_files])
+    if os.path.isfile(path):
+        if os.path.splitext(path)[1].lower() in valid_exts: audio_files.append((path, os.path.basename(path)))
+    elif os.path.isdir(path): 
+        for root, _, files in os.walk(path):
+            valid_files = list(filter(lambda x: os.path.splitext(x)[1].lower() in valid_exts, files))
+            audio_files.extend([(os.path.join(root, f), os.path.join(re.sub(path, '', root), f)) for f in valid_files])
     return audio_files
 
 def main(argv):

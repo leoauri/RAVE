@@ -4,6 +4,7 @@ import os
 from time import time
 from typing import Callable, Optional, Iterable, Dict
 
+
 import gin, pdb
 import numpy as np
 import pytorch_lightning as pl
@@ -17,6 +18,9 @@ from pytorch_lightning.trainer.states import RunningStage
 import rave.core
 
 from . import blocks
+
+MAX_LATENT_FOR_VALIDATION = 2000
+MAX_AUDIO_FOR_LOGGING = 32
 
 
 _default_loss_weights = {
@@ -90,29 +94,34 @@ class BetaWarmupCallback(pl.Callback):
     def __init__(self, initial_value: float = .2,
                        target_value: float = .2,
                        warmup_len: int = 1,
+                       multiplier: float = 1.,
                        log: bool = True) -> None:
         super().__init__()
         self.state = {'training_steps': 0}
         self.warmup_len = warmup_len
         self.initial_value = initial_value
         self.target_value = target_value
+        self.multiplier = multiplier
         self.log_warmup = log
 
     def on_train_batch_start(self, trainer, pl_module, batch,
                              batch_idx) -> None:
         self.state['training_steps'] += 1
-        if self.state["training_steps"] >= self.warmup_len:
-            return
 
         warmup_ratio = self.state["training_steps"] / self.warmup_len
+        target_value = self.multiplier * self.target_value
+
+        if (self.state["training_steps"] >= self.warmup_len):
+            pl_module.beta_factor = target_value
+            return
 
         if self.log_warmup: 
             beta = math.log(self.initial_value) * (1 - warmup_ratio) + math.log(
-                self.target_value) * warmup_ratio
+               target_value) * warmup_ratio
             pl_module.beta_factor = math.exp(beta)
         else:
-            beta = warmup_ratio * (self.target_value - self.initial_value) + self.initial_value
-            pl_module.beta_factor = min(beta, self.target_value)
+            beta = warmup_ratio * (target_value - self.initial_value) + self.initial_value
+            pl_module.beta_factor = min(beta, target_value)
 
     def state_dict(self):
         return self.state.copy()
@@ -171,7 +180,8 @@ class RAVE(pl.LightningModule):
         enable_pqmf_decode: Optional[bool] = None,
         is_mel_input: Optional[bool] = None,
         no_freeze_when_warmed_up: bool = False, 
-        loss_weights = None
+        loss_weights = None,
+        update_pca=True
     ):
         super().__init__()
         self.pqmf = pqmf(n_channels=n_channels)
@@ -194,6 +204,7 @@ class RAVE(pl.LightningModule):
 
         # setup model
         self.encoder = encoder(n_channels=n_channels, no_freeze_when_warmed_up=no_freeze_when_warmed_up)
+        self.no_freeze_when_warmed_up = no_freeze_when_warmed_up
         self.decoder = decoder(n_channels=n_channels)
         self.discriminator = discriminator(n_channels=n_channels)
 
@@ -202,6 +213,8 @@ class RAVE(pl.LightningModule):
 
         self.gan_loss = gan_loss
 
+        self.latent_val_buffer = []
+        self.audio_val_buffer = []
         self.register_buffer("latent_pca", torch.eye(latent_size))
         self.register_buffer("latent_mean", torch.zeros(latent_size))
         self.register_buffer("fidelity", torch.zeros(latent_size))
@@ -209,6 +222,7 @@ class RAVE(pl.LightningModule):
         self.latent_size = latent_size
 
         self.automatic_optimization = False
+        self.update_pca = update_pca
 
         # SCHEDULE
         self.warmup = phase_1_duration
@@ -233,13 +247,13 @@ class RAVE(pl.LightningModule):
         self.audio_monitor_epochs = audio_monitor_epochs
 
     @gin.configurable(module="rave")
-    def configure_optimizers(self, weight_list = None):
+    def configure_optimizers(self, weight_list = None, lr_gen=1.e-3, lr_dis = 1.e-4):
         if weight_list is None:
             gen_p = list(self.encoder.parameters())
             gen_p += list(self.decoder.parameters())
             dis_p = list(self.discriminator.parameters())
-            gen_opt = torch.optim.Adam(gen_p, 1e-3, (.5, .9))
-            dis_opt = torch.optim.Adam(dis_p, 1e-4, (.5, .9))
+            gen_opt = torch.optim.Adam(gen_p, lr_gen, (.5, .9))
+            dis_opt = torch.optim.Adam(dis_p, lr_dis, (.5, .9))
             return ({'optimizer': gen_opt,
                     'lr_scheduler': {'scheduler': torch.optim.lr_scheduler.LinearLR(gen_opt, start_factor=1.0, end_factor=0.1, total_iters=self.warmup)}},
                     {'optimizer':dis_opt})
@@ -250,19 +264,19 @@ class RAVE(pl.LightningModule):
             gen_p = list(map(lambda x: self.get_parameter(x), filter(lambda x: not x.startswith('discriminator'), weight_names)))
             dis_p = list(map(lambda x: self.get_parameter(x), filter(lambda x: x.startswith('discriminator'), weight_names)))
             optimizers = []
+            #TODO not efficient but would require too much re-factor
             if len(gen_p) > 0: 
-                gen_opt = torch.optim.Adam(gen_p, 1e-3, (.5, .9))
-                optimizers.append({'optimizer': gen_opt})
+                gen_opt = torch.optim.Adam(gen_p, lr_gen, (.5, .9))
+            else:
+                gen_opt = torch.optim.Adam(gen_p, 0., (.5, .9))
+            optimizers.append({'optimizer': gen_opt, 'lr_scheduler': {'scheduler': torch.optim.lr_scheduler.LinearLR(gen_opt, start_factor=1.0, end_factor=0.1, total_iters=self.warmup)}})
             if len(dis_p) > 0:
-                dis_opt = torch.optim.Adam(gen_p, 1e-4, (.5, .9))
-                optimizers.append({'optimizer': dis_opt})
-
-
-        gen_opt = torch.optim.Adam(gen_p, 1e-3, (.5, .9))
-        dis_opt = torch.optim.Adam(dis_p, 1e-4, (.5, .9))
-        return ({'optimizer': gen_opt,
-                 'lr_scheduler': {'scheduler': torch.optim.lr_scheduler.LinearLR(gen_opt, start_factor=1.0, end_factor=0.1, total_iters=self.warmup)}},
-                {'optimizer':dis_opt})
+                dis_opt = torch.optim.Adam(gen_p, lr_dis, (.5, .9))
+            else:
+                dis_opt = torch.optim.Adam(gen_p, 0, (.5, .9))
+                self.update_discriminator_every = 1
+            optimizers.append({'optimizer': dis_opt})
+            return tuple(optimizers)
 
     def import_weights(self, weight_dict, strict=False):
         state_dict = self.state_dict()
@@ -313,7 +327,7 @@ class RAVE(pl.LightningModule):
             if self.input_mode == "pqmf":
                 return z, x_enc
             else:
-                x_multiband = _pqmf_encode(self.pqmf, x_enc)
+                x_multiband = _pqmf_encode(self.pqmf, x)
                 return z, x_multiband
         return z
 
@@ -339,6 +353,17 @@ class RAVE(pl.LightningModule):
             raise TypeError('Cannot get latent size from encoder : %s'%(self.latent_size))
 
         return latent_size
+
+    def loss_weight(self, loss_name, batch_idx = None, clamp = True):
+        loss_weight = self.weights[loss_name]
+
+        if isinstance(loss_weight, list):
+            assert len(loss_weight) == 3, "if weight is list then it must be [init, end, n_steps]. Got : %s"%loss_weight
+            loss_init, loss_target, n_steps = loss_weight
+            batch_idx = self.trainer.global_step
+            loss_weight = (loss_target - loss_init) / n_steps * batch_idx + loss_init
+            if clamp: loss_weight = np.clip(loss_weight, min(loss_init, loss_target), max(loss_init, loss_target))
+        return loss_weight
 
     def encode_compressed(self, x, fidelity = 0.99):
         z = self.encode(x, return_mb=False)
@@ -426,13 +451,13 @@ class RAVE(pl.LightningModule):
             x_multiband, y_multiband)
         p.tick('mb distance')
         for k, v in multiband_distance.items():
-            distances[f'multiband_{k}'] = self.weights['multiband_audio_distance'] * v
+            distances[f'multiband_{k}'] = self.loss_weight('multiband_audio_distance', batch_idx) * v
 
         fullband_distance = self.audio_distance(x_raw, y_raw)
         p.tick('fb distance')
 
         for k, v in fullband_distance.items():
-            distances[f'fullband_{k}'] = self.weights['audio_distance'] *  v
+            distances[f'fullband_{k}'] = self.loss_weight('audio_distance', batch_idx) *  v
 
         feature_matching_distance = 0.
 
@@ -485,8 +510,8 @@ class RAVE(pl.LightningModule):
             loss_gen['regularization'] = reg * self.beta_factor
 
         if self.warmed_up:
-            loss_gen['feature_matching'] = self.weights['feature_matching'] * feature_matching_distance
-            loss_gen['adversarial'] = self.weights['adversarial'] * loss_adv
+            loss_gen['feature_matching'] = self.loss_weight('feature_matching', batch_idx) * feature_matching_distance
+            loss_gen['adversarial'] = self.loss_weight('adversarial', batch_idx) * loss_adv
 
         # OPTIMIZATION
         if not (batch_idx %
@@ -499,7 +524,8 @@ class RAVE(pl.LightningModule):
             gen_opt.zero_grad()
             loss_gen_value = 0.
             for k, v in loss_gen.items():
-                loss_gen_value += v * self.weights.get(k, 1.)
+                weight = 1. if not k in self.weights else self.loss_weight(k, batch_idx)
+                loss_gen_value += v * weight
             loss_gen_value.backward()
             gen_opt.step()
 
@@ -549,39 +575,51 @@ class RAVE(pl.LightningModule):
         if not len(out): return
 
         audio, z = out
-        audio = list(map(lambda x: x.cpu(), audio))
+        audio = list(map(lambda x: x.detach().cpu(), audio))
 
         if self.trainer.state.stage == RunningStage.SANITY_CHECKING:
             return
 
-        # LATENT SPACE ANALYSIS
-        if not self.warmed_up and isinstance(self.encoder,
-                                             blocks.VariationalEncoder):
-            #z = torch.cat(z, 0)
-            z = rearrange(z, "b c t -> (b t) c")
+        if len(self.latent_val_buffer) + z.shape[0] < MAX_LATENT_FOR_VALIDATION: 
+            self.latent_val_buffer.extend(z.detach().cpu())
+        
+        if len(self.audio_val_buffer) + len(audio) < MAX_AUDIO_FOR_LOGGING:
+            self.audio_val_buffer.extend(audio)
 
-            self.latent_mean.copy_(z.mean(0))
-            z = z - self.latent_mean
+    def on_validation_epoch_end(self):
 
-            pca = PCA(z.shape[-1]).fit(z.cpu().numpy())
+        if self.trainer.state.stage == RunningStage.SANITY_CHECKING:
+            return
 
-            components = pca.components_
-            components = torch.from_numpy(components).to(z)
-            self.latent_pca.copy_(components)
+        z = torch.stack(self.latent_val_buffer, 0)
+        audio = torch.cat(self.audio_val_buffer, 0)
+        if isinstance(self.encoder, blocks.VariationalEncoder):
+            if not (self.warmed_up and not self.no_freeze_when_warmed_up) and (self.update_pca):
+                #z = torch.cat(z, 0)
+                z = rearrange(z, "b c t -> (b t) c")
 
-            var = pca.explained_variance_ / np.sum(pca.explained_variance_)
-            var = np.cumsum(var)
+                self.latent_mean.copy_(z.mean(0))
+                z = z - self.latent_mean.cpu()
 
-            self.fidelity.copy_(torch.from_numpy(var).to(self.fidelity))
+                pca = PCA(z.shape[-1]).fit(z)
 
-            var_percent = [.8, .9, .95, .99]
-            for p in var_percent:
-                self.log(
-                    f"fidelity_{p}",
-                    np.argmax(var > p).astype(np.float32),
-                )
+                components = pca.components_
+                components = torch.from_numpy(components).to(self.latent_mean)
+                self.latent_pca.copy_(components)
 
-        y = torch.cat(audio[:16], 0).reshape(-1).numpy()
+                var = pca.explained_variance_ / np.sum(pca.explained_variance_)
+                var = np.cumsum(var)
+
+                self.fidelity.copy_(torch.from_numpy(var).to(self.fidelity))
+
+                var_percent = [.8, .9, .95, .99]
+                for p in var_percent:
+                    self.log(
+                        f"fidelity_{p}",
+                        np.argmax(var > p).astype(np.float32),
+                    )
+
+        y = audio.reshape(-1).numpy()
         if self.integrator is not None:
             y = self.integrator(y)
         self.logger.experiment.add_audio("audio_val", y, self.eval_number,

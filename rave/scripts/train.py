@@ -44,6 +44,9 @@ flags.DEFINE_string('db_path',
 flags.DEFINE_string('out_path',
                     default="runs/",
                     help='Output folder')
+flags.DEFINE_float('beta', 
+                   default = None, 
+                   help = "Set manually regularization term (variational / wasserstein only)")
 flags.DEFINE_integer('max_steps',
                      6000000,
                      help='Maximum number of training steps')
@@ -69,7 +72,7 @@ flags.DEFINE_bool('strict_transfer', default=True, help = "allows uncomplete tra
 flags.DEFINE_multi_string('override', default=[], help='Override gin binding')
 flags.DEFINE_integer('workers',
                      default=0,
-                     help='Number of workers to spawn for dataset loading')
+                     help='Number of workers to spawn for dataset loading (default: 0, set -1 for automatic mode)')
 flags.DEFINE_multi_string('device', default="auto", help="training device (default: auto. Can be cuda, cuda:0, ..., mps, etc.)")
 flags.DEFINE_bool('derivative',
                   default=False,
@@ -141,6 +144,7 @@ def main(argv):
     # check dataset channels
     n_channels = rave.dataset.get_training_channels(FLAGS.db_path, FLAGS.channels) if not FLAGS.channels else FLAGS.channels
     FLAGS.override.append('RAVE.n_channels=%d'%n_channels)
+    if FLAGS.beta: FLAGS.override.append("model.BetaWarmupCallback.target_value=%d"%FLAGS.beta)
     
     # parse configuration
     if FLAGS.ckpt:
@@ -251,16 +255,16 @@ def main(argv):
         max_epochs=300000,
         max_steps=FLAGS.max_steps,
         profiler="simple",
+        limit_train_batches=0.2,
+        # fast_dev_run=True,
         enable_progress_bar=FLAGS.progress,
-        log_every_n_steps=min(30, len(dataset)),
+        log_every_n_steps=min(30, len(train)),
         **val_check,
     )
 
 
     with open(os.path.join(FLAGS.out_path, RUN_NAME, "config.gin"), "w") as config_out:
         config_out.write(gin.config_str())
-
-    
 
     trainer.fit(model, train, val, ckpt_path=run)
 
